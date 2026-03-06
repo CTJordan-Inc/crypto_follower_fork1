@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>crypto_follower Dashboard</title>
+    <link rel="stylesheet" href="/static/dashboard.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <main class="container">
+      <section class="panel">
+        <h1>crypto_follower MVP Dashboard</h1>
+        <p class="subtitle">輸入 Ethereum 地址後，直接查詢網路資料並計算 NAV 績效。</p>
+
+        <form id="query-form" class="form-grid">
+          <label>
+            地址
+            <input id="address" name="address" placeholder="0x..." required />
+          </label>
+          <label>
+            開始日期
+            <input id="start_date" name="start_date" type="date" value="{{ default_start_date }}" required />
+          </label>
+          <label>
+            結束日期
+            <input id="end_date" name="end_date" type="date" value="{{ default_end_date }}" required />
+          </label>
+          <label>
+            Top N 代幣
+            <input id="top_n_tokens" name="top_n_tokens" type="number" min="1" max="100" value="{{ default_top_n_tokens }}" required />
+          </label>
+          <button id="submit-btn" type="submit">查詢並計算績效</button>
+        </form>
+
+        <div id="status" class="status"></div>
+      </section>
+
+      <section class="panel">
+        <h2>NAV 曲線</h2>
+        <canvas id="nav-chart"></canvas>
+      </section>
+
+      <section class="panel metrics-grid" id="metrics"></section>
+
+      <section class="panel">
+        <h2>資料品質與選幣</h2>
+        <div id="quality"></div>
+        <div id="tokens"></div>
+      </section>
+    </main>
+
+    <script src="/static/dashboard.js"></script>
+  </body>
+</html>
+
