@@ -142,6 +142,61 @@ class RecomputeRequest(BaseModel):
         return self
 
 
+class NetworkRecomputeRequest(RecomputeRequest):
+    refresh: bool = False
+
+
+class BatchRecomputeRequest(BaseModel):
+    addresses: list[str] = Field(..., min_length=1, max_length=50)
+    start_date: date
+    end_date: date
+    top_n_tokens: int = Field(default=10, ge=1, le=100)
+    refresh: bool = False
+
+    @field_validator("addresses")
+    @classmethod
+    def validate_addresses(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            address = normalize_address(value)
+            if not address or address in seen:
+                continue
+            seen.add(address)
+            normalized.append(address)
+        if not normalized:
+            raise ValueError("addresses cannot be empty")
+        if len(normalized) > 50:
+            raise ValueError("addresses cannot exceed 50 items")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_dates(self) -> "BatchRecomputeRequest":
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must be greater than or equal to start_date")
+        return self
+
+
+class PerformanceBehavior(BaseModel):
+    style: str
+    return_driver: str
+    summary: str
+    gross_inflow_usd: float | None
+    gross_outflow_usd: float | None
+    net_flow_usd: float | None
+    market_pnl_usd: float | None
+    turnover_ratio: float | None
+    round_trip_ratio: float | None
+    net_accumulation_ratio: float | None
+
+
+class PerformanceMeta(BaseModel):
+    used_cache: bool
+    cache_age_minutes: float | None
+    source: str
+    runtime_seconds: float | None
+
+
 class PerformanceResponse(BaseModel):
     address: str
     start_date: date
@@ -150,3 +205,30 @@ class PerformanceResponse(BaseModel):
     nav_curve: list[NavPoint]
     metrics: PerformanceMetrics
     quality: QualityTags
+    behavior: PerformanceBehavior
+    interpretations: list[str]
+    meta: PerformanceMeta
+
+
+class BatchPerformanceItem(BaseModel):
+    address: str
+    success: bool
+    nav_end_usd: float | None = None
+    total_return: float | None = None
+    cagr: float | None = None
+    sharpe: float | None = None
+    behavior_style: str | None = None
+    return_driver: str | None = None
+    explanation: str | None = None
+    used_cache: bool | None = None
+    runtime_seconds: float | None = None
+    error: str | None = None
+
+
+class BatchPerformanceResponse(BaseModel):
+    start_date: date
+    end_date: date
+    requested: int
+    completed: int
+    failed: int
+    results: list[BatchPerformanceItem]

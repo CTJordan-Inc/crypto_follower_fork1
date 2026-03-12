@@ -6,10 +6,15 @@
 
 - 提供 dashboard 網頁（可輸入地址直接查詢）。
 - 透過 Etherscan + CoinGecko 自動同步地址資料並計算績效。
+- 預設優先使用快取；重複查詢同地址同區間時可大幅縮短等待時間。
 - 手動加入地址 watchlist。
 - 匯入地址每日持倉與代幣每日價格資料。
 - 依「Top N + 穩定幣 + 原生幣」組合計算 NAV 曲線。
 - 計算關鍵績效指標：`CAGR`、`MDD`、`Sharpe`、`交易頻率`、`最大單日跌幅`。
+- 拆解地址行為：`屯幣 / 累積 / 減倉 / 中轉 / 混合`。
+- 拆解回報來源：`市場漲跌` vs `淨轉入/轉出`。
+- 提供詮釋說明，避免把「搬倉造成的 NAV 變化」誤判成持幣績效。
+- 支援最多 50 個地址的批量分析面板。
 - 提供資料品質標籤：價格來源、標註來源、疑似交易所/合約旗標。
 - 提供候選地址推薦 API（以市值與穩定成長分數排序）。
 
@@ -40,7 +45,22 @@
 
    ```env
    ETHERSCAN_API_KEY=你的_api_key
+   ETHERSCAN_PAGE_OFFSET=1000
+   ETHERSCAN_MAX_PAGES=5
+   ETHERSCAN_MAX_RETRIES=5
+   ETHERSCAN_REQUEST_INTERVAL_SECONDS=0.35
+   COINGECKO_API_KEY=你的_api_key_可選
+   COINGECKO_MAX_RETRIES=4
+   COINGECKO_REQUEST_INTERVAL_SECONDS=0.3
+   COINGECKO_CONTRACT_CHUNK_SIZE=40
+   SYNC_CACHE_TTL_MINUTES=720
+   BATCH_ADDRESS_LIMIT=50
    ```
+
+   註：Etherscan 會限制 `page * offset <= 10000`，建議維持預設 `offset=1000`。
+   若遇到 Etherscan `Max calls per sec rate limit reached (3/sec)`，可提高 `ETHERSCAN_REQUEST_INTERVAL_SECONDS`（如 `0.6`）。
+   若遇到 CoinGecko `429 Too Many Requests`，可設定 `COINGECKO_API_KEY` 並縮短日期區間。
+   若遇到 CoinGecko `400`（token_price 批次查詢），系統會自動拆小批次重試並略過無效合約。
 
 3. 啟動服務：
 
@@ -60,7 +80,27 @@
 2. 輸入 Ethereum 地址與日期區間
 3. 點擊「查詢並計算績效」
 4. 系統會呼叫 `/api/v1/performance/{address}/network/recompute`
-5. 於頁面顯示 NAV 曲線與關鍵指標
+5. 於頁面顯示 NAV 曲線、資金流拆解、行為判讀與詮釋說明
+
+### 快取策略
+
+- `POST /api/v1/performance/{address}/network/recompute` 預設 `refresh=false`
+- 若同地址與區間在 `SYNC_CACHE_TTL_MINUTES` 內已同步成功，會直接回傳快取結果
+- 若要強制更新鏈上資料，勾選 dashboard 的「強制重抓鏈上與價格資料」
+
+### 行為判讀口徑
+
+- `holding`: 倉位變動低，較接近長期持有
+- `accumulation`: 有持續累積倉位，但仍需看回報是來自市場還是淨轉入
+- `distribution`: 呈現逐步減倉
+- `transit`: 轉入轉出頻繁，較像中轉或換倉地址
+- `mixed`: 同時存在持幣與搬倉行為
+
+回報來源拆解方式：
+
+- `market_appreciation`: NAV 變動主要來自原有持倉漲跌
+- `net_transfers`: NAV 變動主要來自淨轉入/轉出
+- `mixed`: 兩者都有明顯貢獻
 
 ## MVP 資料流（單一地址）
 
@@ -75,6 +115,28 @@
 - `POST /api/v1/performance/{address}/network/recompute`
   - 來源：Etherscan（交易/轉帳）、CoinGecko（每日 USD 價格）
   - 目前鏈別：Ethereum
+  - request body: `{"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD","top_n_tokens":10,"refresh":false}`
+
+## 批量分析 API
+
+- `POST /api/v1/performance/batch/network/recompute`
+  - 一次最多 50 個地址
+  - 預設逐個使用快取；只有缺資料或勾選 `refresh=true` 時才會重抓
+  - 適合先把候選清單跑過一輪，再回到單地址細看
+
+範例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/performance/batch/network/recompute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "addresses": ["0xabc123", "0xdef456"],
+    "start_date": "2025-01-01",
+    "end_date": "2025-03-31",
+    "top_n_tokens": 10,
+    "refresh": false
+  }'
+```
 
 ### 快速示例（先跑通單一地址績效）
 

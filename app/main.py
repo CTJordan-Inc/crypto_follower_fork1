@@ -39,6 +39,7 @@ def home_page(request: Request) -> HTMLResponse:
             "default_start_date": start_date.isoformat(),
             "default_end_date": end_date.isoformat(),
             "default_top_n_tokens": 10,
+            "default_batch_limit": settings.batch_address_limit,
         },
     )
 

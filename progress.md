@@ -179,3 +179,118 @@
 2. 對缺價 token 提供替代來源（Chainlink、Dex TWAP）。
 3. 加入快取與背景任務，避免前端等待過久。
 4. 擴展到多鏈（Base、Arbitrum、BSC）。
+
+---
+
+## 日期
+- 2026-03-11
+
+## 本次目標
+- 針對單地址 MVP 做三件事：
+  1) 降低重複查詢等待時間
+  2) 區分「真的屯幣賺到」與「轉進轉出造成的倉位波動」
+  3) 在 UI 補上更明確的詮釋說明
+- 同時開始下一階段：支援最多 50 個地址的批量分析
+
+## 本次完成項目（依時間序）
+
+1. 單地址分析回應擴充
+   - `app/schemas.py` 新增：
+     - `NetworkRecomputeRequest`
+     - `BatchRecomputeRequest`
+     - `PerformanceBehavior`
+     - `PerformanceMeta`
+     - `BatchPerformanceItem`
+     - `BatchPerformanceResponse`
+   - `PerformanceResponse` 現在除了 NAV / metrics / quality，還會回：
+     - `behavior`
+     - `interpretations`
+     - `meta`
+
+2. 行為分析與回報來源拆解
+   - 重寫 `app/services/performance.py` 的回應組裝流程。
+   - 新增根據每日持倉變化與價格估算的資金流分析：
+     - `gross_inflow_usd`
+     - `gross_outflow_usd`
+     - `net_flow_usd`
+     - `market_pnl_usd`
+     - `turnover_ratio`
+     - `round_trip_ratio`
+   - 新增地址風格分類：
+     - `holding`
+     - `accumulation`
+     - `distribution`
+     - `transit`
+     - `mixed`
+   - 新增回報來源分類：
+     - `market_appreciation`
+     - `net_transfers`
+     - `mixed`
+   - 新增中文詮釋說明，用來幫助判斷這個地址比較像屯幣、搬倉還是中轉。
+
+3. 查詢速度優化（快取優先）
+   - 新增 `AddressSyncState` 資料表於 `app/models.py`，記錄：
+     - 最後同步區間
+     - 最後同步時間
+     - 最後耗時
+     - 成功/失敗狀態
+   - `app/services/performance.py` 新增：
+     - `has_complete_cached_nav()`
+     - `is_cached_sync_fresh()`
+   - `app/services/network_sync.py` 新增：
+     - `load_or_sync_address_performance()`
+   - 行為：
+     - 單地址查詢預設 `refresh=false`
+     - 若 cache 仍新鮮且 NAV 資料完整，直接回傳快取，不重打 Etherscan / CoinGecko
+
+4. 批量分析（最多 50 地址）
+   - `app/services/network_sync.py` 新增：
+     - `batch_load_or_sync_address_performance()`
+   - `app/api/routes/performance.py` 新增：
+     - `POST /api/v1/performance/batch/network/recompute`
+   - 行為：
+     - 最多 50 個地址
+     - 預設逐個優先吃快取
+     - 回傳每個地址的摘要結果與錯誤，不會因單一地址失敗而整批中斷
+
+5. Dashboard UX 補強
+   - `app/templates/index.html`
+     - 新增「強制重抓鏈上與價格資料」選項
+     - 新增地址行為判讀區
+     - 新增詮釋說明區
+     - 新增批量分析表單與結果表格
+   - `app/static/dashboard.js`
+     - 單地址查詢支援 `refresh`
+     - 顯示 `behavior / interpretations / meta`
+     - 新增批量分析請求與結果表格渲染
+   - `app/static/dashboard.css`
+     - 新增批量表格、說明卡片、checkbox row 樣式
+
+6. 文件更新
+   - `README.md` 補上：
+     - 快取策略
+     - 行為判讀口徑
+     - 回報來源拆解
+     - 批量分析 API 與使用方式
+
+## 本次驗證
+- 通過語法檢查：
+  - `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
+- 未能執行完整測試原因：
+  - 目前 CLI 執行環境缺少 `fastapi` / `sqlalchemy` / `httpx` / `pytest`
+  - 使用者本地已能啟動服務，但此 turn 的 shell 環境無對應套件
+
+## 目前狀態
+- 單地址 MVP 已補齊：
+  - 可查單地址
+  - 可顯示績效圖
+  - 可判讀是否較偏屯幣或中轉
+  - 可透過快取降低重複查詢時間
+- 批量分析第一版已就位：
+  - 可一次分析最多 50 個地址
+  - 顯示摘要結果與行為分類
+
+## 接下來建議
+1. 若要真正提升 50 地址首輪分析速度，下一步應做背景任務佇列，而不是同步 HTTP 等待。
+2. 若要更準確判斷「屯幣」與「中轉」，下一步可加入持倉存活天數或 7/30 天 retained balance 指標。
+3. 若要長期使用，應加入 migration（目前 `create_all` 只適合 MVP）。

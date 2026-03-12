@@ -15,10 +15,23 @@ class Settings(BaseSettings):
     etherscan_chain_id: int = 1
     etherscan_api_key: str | None = None
     etherscan_max_pages: int = 5
+    etherscan_page_offset: int = 1000
+    etherscan_max_retries: int = 5
+    etherscan_backoff_seconds: float = 0.6
+    etherscan_request_interval_seconds: float = 0.35
     coingecko_base_url: str = "https://api.coingecko.com/api/v3"
     coingecko_platform: str = "ethereum"
+    coingecko_api_key: str | None = None
+    coingecko_api_key_header: str = "x-cg-demo-api-key"
+    coingecko_max_retries: int = 4
+    coingecko_backoff_seconds: float = 1.5
+    coingecko_request_interval_seconds: float = 0.3
+    coingecko_contract_chunk_size: int = 40
+    coingecko_spot_contract_limit: int = 300
     http_timeout_seconds: int = 30
     default_lookback_days: int = 90
+    sync_cache_ttl_minutes: int = 720
+    batch_address_limit: int = 50
 
     model_config = SettingsConfigDict(
         env_file=".env",

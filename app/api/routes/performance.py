@@ -4,8 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.schemas import PerformanceResponse, RecomputeRequest
-from app.services.network_sync import sync_address_from_network_and_recompute
+from app.schemas import (
+    BatchPerformanceResponse,
+    BatchRecomputeRequest,
+    NetworkRecomputeRequest,
+    PerformanceResponse,
+    RecomputeRequest,
+)
+from app.services.network_sync import batch_load_or_sync_address_performance, load_or_sync_address_performance
 from app.services.performance import get_cached_address_performance, recompute_address_performance
 
 router = APIRouter(prefix="/performance", tags=["performance"])
@@ -31,19 +37,38 @@ def recompute_performance(
         raise HTTPException(status_code=status_code, detail=detail) from error
 
 
-@router.post("/{address}/network/recompute", response_model=PerformanceResponse)
-def recompute_from_network(
-    address: str,
-    payload: RecomputeRequest,
+@router.post("/batch/network/recompute", response_model=BatchPerformanceResponse)
+def recompute_batch_from_network(
+    payload: BatchRecomputeRequest,
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        return sync_address_from_network_and_recompute(
+        return batch_load_or_sync_address_performance(
+            db,
+            addresses=payload.addresses,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+            top_n_tokens=payload.top_n_tokens,
+            refresh=payload.refresh,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+
+@router.post("/{address}/network/recompute", response_model=PerformanceResponse)
+def recompute_from_network(
+    address: str,
+    payload: NetworkRecomputeRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return load_or_sync_address_performance(
             db,
             raw_address=address,
             start_date=payload.start_date,
             end_date=payload.end_date,
             top_n_tokens=payload.top_n_tokens,
+            refresh=payload.refresh,
         )
     except ValueError as error:
         detail = str(error)

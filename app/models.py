@@ -89,3 +89,17 @@ class AddressDailyNAV(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class AddressSyncState(Base):
+    __tablename__ = "address_sync_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    address: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
+    chain: Mapped[str] = mapped_column(String(30), nullable=False, default="ethereum")
+    synced_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    synced_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_runtime_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)

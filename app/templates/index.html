@@ -11,7 +11,7 @@
     <main class="container">
       <section class="panel">
         <h1>crypto_follower MVP Dashboard</h1>
-        <p class="subtitle">輸入 Ethereum 地址後，直接查詢網路資料並計算 NAV 績效。</p>
+        <p class="subtitle">輸入 Ethereum 地址後，直接查詢網路資料、拆解資金流與績效來源。</p>
 
         <form id="query-form" class="form-grid">
           <label>
@@ -30,6 +30,10 @@
             Top N 代幣
             <input id="top_n_tokens" name="top_n_tokens" type="number" min="1" max="100" value="{{ default_top_n_tokens }}" required />
           </label>
+          <label class="checkbox-row">
+            <input id="refresh" name="refresh" type="checkbox" />
+            強制重抓鏈上與價格資料
+          </label>
           <button id="submit-btn" type="submit">查詢並計算績效</button>
         </form>
 
@@ -44,13 +48,56 @@
       <section class="panel metrics-grid" id="metrics"></section>
 
       <section class="panel">
-        <h2>資料品質與選幣</h2>
+        <h2>地址行為判讀</h2>
+        <div id="behavior" class="kv"></div>
+      </section>
+
+      <section class="panel">
+        <h2>詮釋說明</h2>
+        <div id="interpretations" class="notes"></div>
+      </section>
+
+      <section class="panel">
+        <h2>資料品質、來源與選幣</h2>
+        <div id="meta" class="kv"></div>
         <div id="quality"></div>
         <div id="tokens"></div>
+      </section>
+
+      <section class="panel">
+        <h2>批量分析（最多 {{ default_batch_limit }} 個地址）</h2>
+        <form id="batch-form" class="batch-form">
+          <label>
+            地址清單（每行一個）
+            <textarea id="batch-addresses" name="batch_addresses" rows="8" placeholder="0x...\n0x...\n0x..."></textarea>
+          </label>
+          <div class="batch-actions">
+            <p class="batch-hint">預設會優先吃快取，只對缺資料或勾選重抓的地址重新同步。</p>
+            <button id="batch-submit-btn" type="submit">批量分析</button>
+          </div>
+        </form>
+        <div id="batch-status" class="status"></div>
+        <div class="table-wrap">
+          <table id="batch-table" class="batch-table">
+            <thead>
+              <tr>
+                <th>地址</th>
+                <th>期末 NAV</th>
+                <th>總報酬</th>
+                <th>CAGR</th>
+                <th>行為</th>
+                <th>回報來源</th>
+                <th>快取</th>
+                <th>耗時</th>
+                <th>說明</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </section>
     </main>
 
     <script src="/static/dashboard.js"></script>
   </body>
 </html>
-

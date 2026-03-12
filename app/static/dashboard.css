@@ -47,6 +47,7 @@ label {
 }
 
 input,
+textarea,
 button {
   width: 100%;
   border-radius: 8px;
@@ -66,6 +67,17 @@ button {
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 28px;
+}
+
+.checkbox-row input {
+  width: auto;
 }
 
 .status {
@@ -118,3 +130,79 @@ button:disabled {
   color: #cbd5e1;
 }
 
+.notes {
+  display: grid;
+  gap: 8px;
+}
+
+.note-item {
+  background: #0b1220;
+  border-left: 3px solid #60a5fa;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  color: #dbeafe;
+}
+
+.batch-form {
+  display: grid;
+  gap: 12px;
+}
+
+textarea {
+  min-height: 180px;
+  resize: vertical;
+}
+
+.batch-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.batch-hint {
+  margin: 0;
+  font-size: 13px;
+  color: #93c5fd;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin-top: 12px;
+}
+
+.batch-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 920px;
+  font-size: 13px;
+}
+
+.batch-table th,
+.batch-table td {
+  border-bottom: 1px solid #1f2937;
+  padding: 10px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.batch-table th {
+  color: #93c5fd;
+  font-weight: 600;
+}
+
+.batch-table tbody tr:hover {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+@media (max-width: 720px) {
+  .batch-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .checkbox-row {
+    padding-top: 0;
+  }
+}
