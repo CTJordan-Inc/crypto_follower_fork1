@@ -294,3 +294,31 @@
 1. 若要真正提升 50 地址首輪分析速度，下一步應做背景任務佇列，而不是同步 HTTP 等待。
 2. 若要更準確判斷「屯幣」與「中轉」，下一步可加入持倉存活天數或 7/30 天 retained balance 指標。
 3. 若要長期使用，應加入 migration（目前 `create_all` 只適合 MVP）。
+
+## 日期
+- 2026-03-12
+
+## 本次小幅維護
+- 新增 `.gitignore`，忽略：
+  - `.env`
+  - `.venv/`
+  - `__pycache__/`
+  - `*.pyc`
+  - `*.db`
+  - `.DS_Store`
+  - 常見 Python 測試/覆蓋率/IDE 產物
+
+## 補充說明
+- 目前下列檔案已經被 Git 追蹤，所以新增 `.gitignore` 之後也不會自動停止追蹤：
+  - `.env`
+  - `.DS_Store`
+  - `crypto_follower.db`
+  - 部分 `app/__pycache__/*.pyc`
+- 若後續要把這些檔案從版控中移除，需要再做一次 `git rm --cached`。
+
+## 後續處理
+- 已執行 `git rm --cached`，將下列已追蹤但應忽略的本地檔案從索引移除，並保留在本機：
+  - `.env`
+  - `.DS_Store`
+  - `crypto_follower.db`
+  - `app/**/__pycache__/*.pyc`

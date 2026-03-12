@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# Environment files
+.env
+.env.local
+
+# Virtual environments
+.venv/
+venv/
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE/editor files
+.idea/
+.vscode/
