@@ -276,6 +276,276 @@
 ## 本次驗證
 - 通過語法檢查：
   - `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
+
+## 日期
+- 2026-03-12
+
+## 本次小幅 UI 調整
+- 使用者要求 hover button 時要有變色特效
+- 已在 `app/static/dashboard.css` 補上：
+  - button hover 顏色變化
+  - 陰影效果
+  - 輕微上浮位移
+  - transition 過渡動畫
+- 範圍包含：
+  - 主要按鈕
+  - 次要按鈕（包含隨機地址、保存分析載入按鈕）
+
+## 日期
+- 2026-03-12
+
+## 本次效能優化（單地址/批量共用）
+- 背景：
+  - 目前冷啟動查詢的主要瓶頸不是本地 NAV 計算，而是外部 API 抓取與重複抓價格
+  - 先做不改資料來源口徑、但能顯著減少重複 I/O 的優化
+
+## 本次完成項目
+
+1. CoinGecko 價格快取重用
+   - `app/services/network_sync.py` 新增：
+     - `_load_recent_cached_coingecko_prices()`
+     - `_load_cached_coingecko_price_series()`
+     - `_series_covers_active_dates()`
+     - `_build_token_active_dates()`
+   - 行為：
+     - spot ranking 前先看本地 DB 是否已有近期 `coingecko` 價格
+     - 每個 selected token 在抓歷史價格前，先判斷 DB 內既有日價格是否已覆蓋持倉活躍日期
+     - 若已覆蓋，就直接重用，不再重打 CoinGecko
+     - 若只覆蓋一部分，就合併既有價格與新抓到的價格
+
+2. 保存完整 holdings，而不是只存 Top N
+   - 調整 `app/services/network_sync.py` 的 `_replace_holdings()`
+   - 之前只把 selected tokens 寫入 `address_daily_holdings`
+   - 現在會把該區間內所有正持倉都寫入 DB
+   - 目的：
+     - 避免未來重算/改區間時，舊快取少了 token 導致分析失真
+     - 為後續做起始持倉 checkpoint / incremental sync 打基礎
+
+3. 測試補充
+   - `tests/test_network_sync.py`
+     - 新增價格覆蓋判斷測試
+     - 新增完整 holdings 寫入測試
+
+4. 文件補充
+   - `README.md`
+     - 快取策略新增「跨地址共用 CoinGecko 價格快取」
+     - 補充現在保存的是完整 holdings 快照
+
+## 本次驗證
+- 通過語法檢查：
+  - `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
+- 通過前端 JS 語法檢查：
+  - `node --check app/static/dashboard.js`
+
+## 日期
+- 2026-03-12
+
+## 本次持續優化與專案級檢視
+- 使用者要求：
+  1) 繼續優化效能
+  2) 優化後重新謹慎檢視整個專案，確認是否有潛在邏輯錯誤
+
+## 本次新增優化
+
+1. 增量同步邏輯修正
+   - `app/services/network_sync.py`
+   - 修正點：
+     - 原本若使用舊 holdings 快照作為 initial state，會漏掉 `快照日 + 1` 到 `start_date - 1` 之間的事件
+     - 這會導致起始持倉錯誤，進而讓整段績效失真
+   - 已修正：
+     - `build_daily_balances_from_events()` 新增 `initial_snapshot_date`
+     - 若有 initial snapshot，會先把 snapshot 之後、`start_date` 之前的 delta 補回去，再開始算區間
+
+2. cache-hit 與 fresh recompute 口徑對齊
+   - `app/services/performance.py`
+   - 修正點：
+     - 自從 holdings 改成保存完整快照後，`get_cached_address_performance()` 會把所有 token 都當成 selected tokens
+     - 造成 cache-hit 結果與 fresh recompute 的 `top_n_tokens` 口徑不一致
+   - 已修正：
+     - `get_cached_address_performance()` 新增 `top_n_tokens`
+     - cache-hit 現在也會重新跑同一套 `Top N + 穩定幣 + 原生幣` 選幣邏輯
+     - `GET /api/v1/performance/{address}` 也補上 `top_n_tokens` query param
+
+3. 零持倉日不再讓快取失效
+   - `app/services/performance.py`
+   - 修正點：
+     - 原本若某幾天沒有持倉 row，NAV 曲線會少這些日期
+     - `has_complete_cached_nav()` 會因此誤判快取不完整，導致重複同步
+   - 已修正：
+     - `_build_daily_holding_view()` 現在會預先補齊 `start_date ~ end_date` 的所有日期
+     - 空倉日會以 `0 NAV / 空 snapshot` 保留在計算結果裡
+
+4. sync 狀態錯誤資訊修正
+   - `app/services/network_sync.py`
+   - 修正點：
+     - `_upsert_sync_state()` 之前只有在第一次失敗時才會記錄 error
+     - 若地址曾成功同步過，之後再失敗，錯誤資訊不會更新
+   - 已修正：
+     - error 狀態現在每次都會覆蓋更新 `last_status / last_error / last_runtime_seconds`
+
+5. 測試基礎修正
+   - 新增 `pytest.ini`
+   - 修正點：
+     - 原本 `pytest` 在本機無法 import `app`
+   - 已修正：
+     - 補 `pythonpath = .`
+     - 現在可直接跑 `.venv/bin/pytest`
+
+6. 測試穩定性修正
+   - `tests/test_metrics.py`
+   - 修正點：
+     - 原本用 `==` 比 float，容易被浮點誤差打爆
+   - 已修正：
+     - 改成 `pytest.approx`
+   - `app/services/metrics.py`
+     - 補 `_round_metric()`，讓 API 輸出的 metrics 更穩定整潔
+
+## 本次 review 發現並已修復的潛在邏輯錯誤
+1. 增量同步會漏算快照與查詢起點之間的事件
+2. cache-hit 不遵守 `top_n_tokens`
+3. 空倉日會讓快取永遠被判定為不完整
+4. sync error state 在曾成功後不會再更新
+5. pytest 基礎設定缺失，導致測試表面上存在、實際上不能直接跑
+
+## 本次測試結果
+- `.venv/bin/pytest -q`
+  - `18 passed`
+- `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
+  - 通過
+- `node --check app/static/dashboard.js`
+  - 通過
+
+## 日期
+- 2026-03-13
+
+## 本次功能優化（市值篩選 / 保存列表 / UI 說明）
+
+1. 隨機地址支援地址市值過濾
+   - `GET /api/v1/performance/random-addresses` 現在新增：
+     - `start_date`
+     - `end_date`
+     - `top_n_tokens`
+     - `min_market_cap_usd`
+     - `market_cap_basis`
+   - 流程：
+     - 先從近期活躍地址抽樣
+     - 再以同一區間、同一 `Top N` 預分析地址
+     - 用地址市值門檻過濾
+   - 目前地址市值口徑：
+     - `max_nav`：區間內最大 NAV（預設）
+     - `average_nav`：區間內平均 NAV
+
+2. Performance meta 新增地址市值資料
+   - `app/services/performance.py`
+   - 現在每次分析都會回：
+     - `address_market_cap_usd`
+     - `address_market_cap_basis`
+     - `address_peak_nav_usd`
+     - `address_average_nav_usd`
+   - 用途：
+     - 單地址頁面顯示
+     - 批量分析結果顯示
+     - 保存分析摘要與排序
+
+3. 批量分析 UX 補強
+   - `app/templates/index.html`
+   - 批量分析區現在有自己的設定欄位：
+     - 開始日期
+     - 結束日期
+     - `Top N`
+     - 最低地址市值
+     - 市值口徑
+   - 這樣批量分析不再偷偷共用單地址區的 `Top N`，避免使用者誤解
+
+4. 已保存分析 UX 補強
+   - 表格新增：
+     - 地址市值欄位
+     - 排序欄位 / 排序方向控制
+   - 動作按鈕由 `載入` 改成 `查看詳情`
+   - 文案明確說明：
+     - 這個動作會把該筆保存分析顯示到上方圖表與指標區
+
+5. 頁面上方增加定義說明
+   - 新增靜態說明卡片，解釋：
+     - 總報酬
+     - 地址行為
+     - 回報來源
+     - 地址市值
+   - 目的：
+     - 降低使用者對欄位意義的理解成本
+
+## 本次 debug（功能外）
+- `etherscan block lookup failed: NOTOK Error! Block timestamp too far in the future`
+- 已修正：
+  - block lookup 會把 `end_date` clamp 到「現在 UTC 時間」
+  - 若使用者選到今天或未來日期，不再把 `23:59:59 UTC` 直接丟給 Etherscan
+  - `sync_address_from_network_and_recompute()` 也會使用有效的 `effective_end_date`
+- 詳細 debug 紀錄另寫：
+  - `debug_2026-03-13.md`
+
+## 本次驗證
+- `.venv/bin/pytest -q`
+  - `20 passed`
+- `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
+  - 通過
+- `node --check app/static/dashboard.js`
+  - 通過
+
+## 日期
+- 2026-03-12
+
+## 本次效能優化（第 2 波：增量同步基礎版）
+- 背景：
+  - 前一輪已減少重複抓價格
+  - 這一輪要處理另一個大瓶頸：只要地址以前同步過，就不應再從 genesis 重播整段歷史
+
+## 本次完成項目
+
+1. 用本地 holdings 快照做增量同步起點
+   - `app/services/network_sync.py` 新增：
+     - `_load_latest_holding_snapshot_before()`
+   - 行為：
+     - 若 DB 內已經有此地址在 `start_date` 之前最近一天的完整 holdings
+     - 下一次同步就直接從該快照隔天開始抓事件
+     - 不再重播更早的歷史 delta
+
+2. Etherscan 查詢加上 block range 限制
+   - `app/services/network_sync.py` 新增：
+     - `_etherscan_block_json()`
+     - `_get_block_number_by_timestamp()`
+     - `_resolve_block_range()`
+   - `txlist` / `tokentx` 現在支援帶入 `start_block` / `end_block`
+   - 用途：
+     - 增量同步時，只抓快照後到 `end_date` 的區塊
+     - 冷啟動時至少也會把 `endblock` 限縮到 `end_date`，不再抓到未來區塊
+
+3. 日持倉還原支援初始快照
+   - `build_daily_balances_from_events()` 新增：
+     - `initial_balances`
+     - `initial_token_contracts`
+   - 行為：
+     - 若有快照，直接以快照作為初始 state
+     - 只套用後續新事件
+
+4. 測試補充
+   - `tests/test_network_sync.py`
+     - 新增用 `initial_balances` 還原日持倉的測試
+     - 新增讀取最近 holdings 快照的測試
+
+## 口徑說明
+- 這一輪優化主要加速：
+  - 同地址重查
+  - 同地址改較晚的 `end_date`
+  - 已分析過一段期間、接著往後滾動查詢的情境
+- 對「第一次分析一個全新地址」：
+  - 仍需走冷啟動路徑
+  - 因為沒有可信的起始持倉快照，不能直接砍掉更早歷史，否則績效口徑會錯
+
+## 本次驗證
+- 通過語法檢查：
+  - `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
+- 通過前端 JS 語法檢查：
+  - `node --check app/static/dashboard.js`
 - 未能執行完整測試原因：
   - 目前 CLI 執行環境缺少 `fastapi` / `sqlalchemy` / `httpx` / `pytest`
   - 使用者本地已能啟動服務，但此 turn 的 shell 環境無對應套件
@@ -322,3 +592,142 @@
   - `.DS_Store`
   - `crypto_follower.db`
   - `app/**/__pycache__/*.pyc`
+
+## 日期
+- 2026-03-12
+
+## 本次功能追加
+- 需求：
+  1) 增加一個按鈕，自動隨機產生 50 個地址，方便直接做批量分析
+  2) 把跑完的分析結果保存起來，之後同一地址同一區間可以直接回看
+
+## 本次完成項目
+
+1. 分析結果保存
+   - `app/models.py` 新增 `SavedAnalysisSnapshot` 資料表，欄位包含：
+     - `address`
+     - `start_date`
+     - `end_date`
+     - `top_n_tokens`
+     - `nav_end_usd`
+     - `total_return`
+     - `cagr`
+     - `sharpe`
+     - `behavior_style`
+     - `return_driver`
+     - `analysis_source`
+     - `payload`
+     - `saved_at`
+   - `app/services/analysis_store.py` 新增保存與查詢邏輯：
+     - `save_analysis_snapshot()`
+     - `list_saved_analysis_snapshots()`
+     - `get_saved_analysis_snapshot()`
+     - `get_saved_addresses()`
+   - 保存策略：
+     - 單地址分析成功後自動保存
+     - 批量分析成功的每個地址也自動保存
+     - 相同 `address + start_date + end_date + top_n_tokens` 會更新既有 snapshot，不重複插入
+
+2. 保存分析 API
+   - `app/api/routes/performance.py` 新增：
+     - `GET /api/v1/performance/saved`
+     - `GET /api/v1/performance/saved/{snapshot_id}`
+   - 用途：
+     - 列出最近保存的分析摘要
+     - 載入某一筆已保存的完整分析結果
+
+3. 隨機 50 地址產生
+   - `app/services/network_sync.py` 新增 `generate_random_recent_addresses()`
+   - 作法：
+     - 使用 Etherscan proxy API 讀最新區塊號
+     - 從近期區塊範圍內隨機抽樣區塊
+     - 從交易 `from` address 收集可分析地址
+     - 預設排除已保存過分析的地址，避免重複
+   - `app/api/routes/performance.py` 新增：
+     - `GET /api/v1/performance/random-addresses`
+
+4. Dashboard 補強
+   - `app/templates/index.html`
+     - 批量分析區新增「隨機產生 50 地址」按鈕
+     - 新增「已保存分析」表格
+   - `app/static/dashboard.js`
+     - 新增隨機地址填入批量 textarea 的流程
+     - 新增讀取保存分析列表與載入單筆 snapshot 的流程
+     - 單地址/批量分析完成後自動刷新保存分析列表
+   - `app/static/dashboard.css`
+     - 補上批量按鈕與保存分析表格樣式
+
+5. 設定與文件
+   - `app/core/config.py` 新增：
+     - `saved_analysis_limit`
+     - `random_address_block_window`
+     - `random_address_sample_blocks`
+   - `.env.example` 補上對應環境變數
+   - `README.md` 補上：
+     - 隨機地址 API 與行為說明
+     - 保存分析 snapshot 的口徑與 API
+
+6. 回歸測試
+   - 新增 `tests/test_analysis_store.py`
+   - 覆蓋：
+     - 相同地址/區間/top_n 的 snapshot 會更新而不是重複插入
+     - 已保存地址集合會正規化後回傳
+
+## 本次驗證
+- 通過語法檢查：
+  - `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
+- 目前 CLI shell 環境仍未安裝完整依賴，因此未在此處實跑 `pytest`
+
+## 交付狀態
+- 現在 dashboard 已可：
+  1) 一鍵取 50 個隨機地址
+  2) 直接做批量分析
+  3) 保存結果
+  4) 未來直接回看同地址、同區間的分析結果
+
+## 日期
+- 2026-03-12
+
+## 本次 UX / 效能修正
+- 背景：
+  - 使用者回報「隨機產生 50 地址」按鈕看起來像沒反應
+  - 也要求所有按鈕都要有 loading icon，避免誤會系統卡住
+
+## 本次修正內容
+
+1. 隨機地址取樣速度優化
+   - `app/services/network_sync.py`
+     - 新增 `_select_random_recent_blocks()`
+     - `generate_random_recent_addresses()` 不再預設掃描過多區塊
+   - 調整設定預設：
+     - `random_address_sample_blocks` 從 `40` 下修到 `12`
+   - 目的：
+     - 減少 Etherscan proxy 請求數
+     - 讓隨機地址按鈕在正常情況下更快返回，不會像長時間卡住
+
+2. 前端按鈕 loading UX
+   - `app/static/dashboard.js`
+     - 新增 `setButtonLoading()`
+     - 新增 `fetchJson()` 與統一錯誤處理
+   - 套用範圍：
+     - 單地址查詢按鈕
+     - 批量分析按鈕
+     - 隨機產生 50 地址按鈕
+     - 已保存分析的「載入」按鈕
+   - 行為：
+     - 點擊後立即顯示 spinner
+     - 按鈕文字切換成 `查詢中 / 分析中 / 取樣中 / 載入中`
+     - 請求結束後恢復原狀
+
+3. 前端逾時提示
+   - 隨機地址按鈕加上前端 timeout 控制
+   - 若後端過久未返回，前端會明確顯示「請求逾時，請稍後再試」
+   - 避免使用者看到按鈕無限 loading 卻不知道發生什麼事
+
+4. 測試補充
+   - `tests/test_network_sync.py`
+     - 新增 `_select_random_recent_blocks()` 的基本測試
+
+## 本次驗證
+- 通過語法檢查：
+  - `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`

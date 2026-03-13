@@ -1,5 +1,7 @@
 from datetime import date, timedelta
 
+import pytest
+
 from app.services.metrics import (
     NavPointData,
     build_metrics,
@@ -40,8 +42,7 @@ def test_build_metrics_contains_core_fields() -> None:
     nav_points = _build_nav_points([100, 105, 110, 108, 120])
     metrics = build_metrics(nav_points, trade_frequency=0.2)
     assert metrics["cagr"] is not None
-    assert metrics["mdd"] == (108 / 110) - 1
-    assert metrics["trade_frequency"] == 0.2
-    assert metrics["max_single_day_drop"] == (108 / 110) - 1
-    assert metrics["total_return"] == 0.2
-
+    assert metrics["mdd"] == pytest.approx((108 / 110) - 1)
+    assert metrics["trade_frequency"] == pytest.approx(0.2)
+    assert metrics["max_single_day_drop"] == pytest.approx((108 / 110) - 1)
+    assert metrics["total_return"] == pytest.approx(0.2)

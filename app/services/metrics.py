@@ -14,6 +14,12 @@ class NavPointData:
     price_sources: list[str]
 
 
+def _round_metric(value: float | None, digits: int = 12) -> float | None:
+    if value is None:
+        return None
+    return round(value, digits)
+
+
 def calculate_daily_returns(nav_points: list[NavPointData]) -> list[float]:
     if len(nav_points) < 2:
         return []
@@ -112,10 +118,12 @@ def build_metrics(nav_points: list[NavPointData], trade_frequency: float | None)
         total_return = (end_nav / start_nav) - 1
 
     return {
-        "cagr": calculate_cagr(start_nav, end_nav, nav_points[0].date, nav_points[-1].date),
-        "mdd": calculate_max_drawdown(nav_points),
-        "sharpe": calculate_sharpe_ratio(daily_returns),
-        "trade_frequency": trade_frequency,
-        "max_single_day_drop": min(daily_returns) if daily_returns else None,
-        "total_return": total_return,
+        "cagr": _round_metric(
+            calculate_cagr(start_nav, end_nav, nav_points[0].date, nav_points[-1].date)
+        ),
+        "mdd": _round_metric(calculate_max_drawdown(nav_points)),
+        "sharpe": _round_metric(calculate_sharpe_ratio(daily_returns)),
+        "trade_frequency": _round_metric(trade_frequency),
+        "max_single_day_drop": _round_metric(min(daily_returns) if daily_returns else None),
+        "total_return": _round_metric(total_return),
     }

@@ -2,6 +2,7 @@ const form = document.getElementById("query-form");
 const batchForm = document.getElementById("batch-form");
 const statusBox = document.getElementById("status");
 const batchStatusBox = document.getElementById("batch-status");
+const savedStatusBox = document.getElementById("saved-status");
 const metricsBox = document.getElementById("metrics");
 const behaviorBox = document.getElementById("behavior");
 const interpretationsBox = document.getElementById("interpretations");
@@ -10,10 +11,90 @@ const qualityBox = document.getElementById("quality");
 const tokensBox = document.getElementById("tokens");
 const submitBtn = document.getElementById("submit-btn");
 const batchSubmitBtn = document.getElementById("batch-submit-btn");
+const randomBatchBtn = document.getElementById("random-batch-btn");
+const batchStartDateInput = document.getElementById("batch_start_date");
+const batchEndDateInput = document.getElementById("batch_end_date");
+const batchTopNTokensInput = document.getElementById("batch_top_n_tokens");
+const batchMinMarketCapInput = document.getElementById("batch_min_market_cap_usd");
+const batchMarketCapBasisInput = document.getElementById("batch_market_cap_basis");
+const batchExcludeSavedInput = document.getElementById("batch_exclude_saved");
+const batchTextarea = document.getElementById("batch-addresses");
 const batchTableBody = document.querySelector("#batch-table tbody");
+const savedTableBody = document.querySelector("#saved-table tbody");
+const savedSortByInput = document.getElementById("saved_sort_by");
+const savedSortOrderInput = document.getElementById("saved_sort_order");
 const chartCtx = document.getElementById("nav-chart").getContext("2d");
 
 let navChart = null;
+
+async function extractErrorMessage(response, fallbackMessage) {
+  try {
+    const rawText = await response.text();
+    if (!rawText) return fallbackMessage;
+
+    try {
+      const payload = JSON.parse(rawText);
+      if (payload && typeof payload.detail === "string" && payload.detail) {
+        return payload.detail;
+      }
+    } catch (error) {
+      return rawText;
+    }
+    return rawText;
+  } catch (error) {
+    return fallbackMessage;
+  }
+}
+
+async function fetchJson(url, options = {}) {
+  const { timeoutMs = 0, ...fetchOptions } = options;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  let timeoutId = null;
+
+  if (controller) {
+    fetchOptions.signal = controller.signal;
+    timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  }
+
+  try {
+    const response = await fetch(url, fetchOptions);
+    if (!response.ok) {
+      throw new Error(await extractErrorMessage(response, `HTTP ${response.status}`));
+    }
+    return await response.json();
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("請求逾時，請稍後再試");
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
+function setButtonLoading(button, isLoading, loadingText) {
+  if (!(button instanceof HTMLButtonElement)) return;
+
+  if (isLoading) {
+    if (!button.dataset.originalText) {
+      button.dataset.originalText = button.textContent || "";
+    }
+    button.disabled = true;
+    button.classList.add("is-loading");
+    if (loadingText) {
+      button.textContent = loadingText;
+    }
+    return;
+  }
+
+  button.disabled = false;
+  button.classList.remove("is-loading");
+  if (button.dataset.originalText) {
+    button.textContent = button.dataset.originalText;
+  }
+}
 
 function formatPct(value) {
   if (value === null || value === undefined) return "N/A";
@@ -30,9 +111,42 @@ function formatUsd(value) {
   return `$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }
 
+function formatDateTime(value) {
+  if (!value) return "N/A";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function formatMarketCapBasis(value) {
+  if (value === "average_nav") return "平均 NAV";
+  return "最大 NAV";
+}
+
 function setStatus(target, message, isError = false) {
   target.textContent = message;
   target.style.color = isError ? "#fca5a5" : "#93c5fd";
+}
+
+function getSharedQueryParams() {
+  const formData = new FormData(form);
+  return {
+    startDate: String(formData.get("start_date") || ""),
+    endDate: String(formData.get("end_date") || ""),
+    topNTokens: Number(formData.get("top_n_tokens") || 10),
+    refresh: formData.get("refresh") === "on",
+  };
+}
+
+function getBatchQueryParams() {
+  return {
+    startDate: String(batchStartDateInput?.value || ""),
+    endDate: String(batchEndDateInput?.value || ""),
+    topNTokens: Number(batchTopNTokensInput?.value || 10),
+    minMarketCapUsd: Number(batchMinMarketCapInput?.value || 0),
+    marketCapBasis: String(batchMarketCapBasisInput?.value || "max_nav"),
+    excludeSaved: batchExcludeSavedInput?.checked ?? true,
+    refresh: document.getElementById("refresh")?.checked ?? false,
+  };
 }
 
 function renderMetrics(metrics) {
@@ -80,6 +194,10 @@ function renderMeta(meta, quality) {
     ["是否使用快取", meta.used_cache ? "是" : "否"],
     ["快取年齡", meta.cache_age_minutes === null || meta.cache_age_minutes === undefined ? "N/A" : `${meta.cache_age_minutes.toFixed(1)} 分鐘`],
     ["本次耗時", meta.runtime_seconds === null || meta.runtime_seconds === undefined ? "N/A" : `${meta.runtime_seconds.toFixed(2)} 秒`],
+    ["地址市值", formatUsd(meta.address_market_cap_usd)],
+    ["地址市值口徑", formatMarketCapBasis(meta.address_market_cap_basis)],
+    ["區間最大 NAV", formatUsd(meta.address_peak_nav_usd)],
+    ["區間平均 NAV", formatUsd(meta.address_average_nav_usd)],
     ["價格來源", (quality.price_sources || []).join(", ") || "N/A"],
     ["標註來源", quality.label_source || "N/A"],
     ["疑似交易所", quality.suspected_exchange ? "是" : "否"],
@@ -155,6 +273,9 @@ function renderSingleAddress(payload) {
   renderInterpretations(payload.interpretations);
   renderMeta(payload.meta, payload.quality);
   renderTokens(payload.selected_tokens);
+  document.getElementById("address").value = payload.address;
+  document.getElementById("start_date").value = payload.start_date;
+  document.getElementById("end_date").value = payload.end_date;
 }
 
 function renderBatchResults(results) {
@@ -164,6 +285,7 @@ function renderBatchResults(results) {
       return `
         <tr>
           <td>${row.address}</td>
+          <td>${formatUsd(row.market_cap_usd)}</td>
           <td>${formatUsd(row.nav_end_usd)}</td>
           <td>${formatPct(row.total_return)}</td>
           <td>${formatPct(row.cagr)}</td>
@@ -178,26 +300,107 @@ function renderBatchResults(results) {
     .join("");
 }
 
+function renderSavedAnalyses(items) {
+  savedTableBody.innerHTML = (items || [])
+    .map(
+      (item) => `
+        <tr>
+          <td>${item.address}</td>
+          <td>${item.start_date} ~ ${item.end_date}</td>
+          <td>${formatUsd(item.market_cap_usd)}</td>
+          <td>${formatPct(item.total_return)}</td>
+          <td>${item.behavior_style || "N/A"}</td>
+          <td>${item.return_driver || "N/A"}</td>
+          <td>${formatDateTime(item.saved_at)}</td>
+          <td><button type="button" class="secondary-button saved-load-btn" data-snapshot-id="${item.id}">查看詳情</button></td>
+        </tr>
+      `
+    )
+    .join("");
+}
+
+async function loadSavedAnalyses() {
+  try {
+    const params = new URLSearchParams({
+      limit: "50",
+      sort_by: String(savedSortByInput?.value || "saved_at"),
+      sort_order: String(savedSortOrderInput?.value || "desc"),
+    });
+    const payload = await fetchJson(`/api/v1/performance/saved?${params.toString()}`, { timeoutMs: 10000 });
+    renderSavedAnalyses(payload.items);
+    setStatus(savedStatusBox, `已載入 ${payload.items.length} 筆保存分析。`);
+  } catch (error) {
+    setStatus(savedStatusBox, `失敗：${error.message}`, true);
+  }
+}
+
+async function loadSavedSnapshot(snapshotId, button = null) {
+  setButtonLoading(button, true, "查看中...");
+  setStatus(savedStatusBox, "正在把這筆保存分析顯示到上方圖表...");
+  try {
+    const payload = await fetchJson(`/api/v1/performance/saved/${snapshotId}`, { timeoutMs: 10000 });
+    renderSingleAddress(payload);
+    setStatus(savedStatusBox, "已在上方顯示這筆保存分析。");
+  } catch (error) {
+    setStatus(savedStatusBox, `失敗：${error.message}`, true);
+  } finally {
+    setButtonLoading(button, false);
+  }
+}
+
+async function handleRandomBatchAddresses() {
+  const { startDate, endDate, topNTokens, minMarketCapUsd, marketCapBasis, excludeSaved } = getBatchQueryParams();
+  setButtonLoading(randomBatchBtn, true, "取樣中...");
+  setStatus(
+    batchStatusBox,
+    minMarketCapUsd > 0
+      ? `正在取樣並篩掉地址市值低於 ${formatUsd(minMarketCapUsd)} 的地址...`
+      : "正在從近期鏈上活動取樣地址..."
+  );
+  try {
+    const params = new URLSearchParams({
+      count: "50",
+      start_date: startDate,
+      end_date: endDate,
+      top_n_tokens: String(topNTokens),
+      min_market_cap_usd: String(minMarketCapUsd),
+      market_cap_basis: marketCapBasis,
+      exclude_saved: String(excludeSaved),
+    });
+    const payload = await fetchJson(`/api/v1/performance/random-addresses?${params.toString()}`, {
+      timeoutMs: 180000,
+    });
+    batchTextarea.value = (payload.addresses || []).join("\n");
+    setStatus(
+      batchStatusBox,
+      payload.count < 50
+        ? `已填入 ${payload.count} 個地址；篩選後不足 50。地址市值口徑：${formatMarketCapBasis(payload.market_cap_basis)}，最低門檻：${formatUsd(payload.min_market_cap_usd)}`
+        : `已填入 ${payload.count} 個地址。地址市值口徑：${formatMarketCapBasis(payload.market_cap_basis)}，最低門檻：${formatUsd(payload.min_market_cap_usd)}`
+    );
+  } catch (error) {
+    setStatus(batchStatusBox, `失敗：${error.message}`, true);
+  } finally {
+    setButtonLoading(randomBatchBtn, false);
+  }
+}
+
 async function handleSubmit(event) {
   event.preventDefault();
 
   const formData = new FormData(form);
   const address = String(formData.get("address") || "").trim();
-  const startDate = String(formData.get("start_date") || "");
-  const endDate = String(formData.get("end_date") || "");
-  const topNTokens = Number(formData.get("top_n_tokens") || 10);
-  const refresh = formData.get("refresh") === "on";
+  const { startDate, endDate, topNTokens, refresh } = getSharedQueryParams();
 
   if (!address) {
     setStatus(statusBox, "請輸入地址", true);
     return;
   }
 
-  submitBtn.disabled = true;
+  setButtonLoading(submitBtn, true, "查詢中...");
   setStatus(statusBox, refresh ? "正在重抓鏈上與價格資料..." : "先檢查快取，必要時再同步網路資料...");
 
   try {
-    const response = await fetch(
+    const payload = await fetchJson(
       `/api/v1/performance/${encodeURIComponent(address)}/network/recompute`,
       {
         method: "POST",
@@ -210,31 +413,21 @@ async function handleSubmit(event) {
         }),
       }
     );
-
-    if (!response.ok) {
-      const errorBody = await response.json();
-      throw new Error(errorBody.detail || "查詢失敗");
-    }
-
-    const payload = await response.json();
     renderSingleAddress(payload);
     setStatus(statusBox, payload.meta.used_cache ? "完成：已使用快取資料並重算展示。" : "完成：已同步網路資料並更新績效。");
+    await loadSavedAnalyses();
   } catch (error) {
     setStatus(statusBox, `失敗：${error.message}`, true);
   } finally {
-    submitBtn.disabled = false;
+    setButtonLoading(submitBtn, false);
   }
 }
 
 async function handleBatchSubmit(event) {
   event.preventDefault();
 
-  const formData = new FormData(form);
-  const startDate = String(formData.get("start_date") || "");
-  const endDate = String(formData.get("end_date") || "");
-  const topNTokens = Number(formData.get("top_n_tokens") || 10);
-  const refresh = formData.get("refresh") === "on";
-  const addresses = String(document.getElementById("batch-addresses").value || "")
+  const { startDate, endDate, topNTokens, refresh } = getBatchQueryParams();
+  const addresses = String(batchTextarea.value || "")
     .split("\n")
     .map((row) => row.trim())
     .filter(Boolean);
@@ -244,11 +437,11 @@ async function handleBatchSubmit(event) {
     return;
   }
 
-  batchSubmitBtn.disabled = true;
+  setButtonLoading(batchSubmitBtn, true, "分析中...");
   setStatus(batchStatusBox, refresh ? "批量重抓中，這會比較慢..." : "批量分析中，會優先使用快取...");
 
   try {
-    const response = await fetch("/api/v1/performance/batch/network/recompute", {
+    const payload = await fetchJson("/api/v1/performance/batch/network/recompute", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -259,24 +452,32 @@ async function handleBatchSubmit(event) {
         refresh,
       }),
     });
-
-    if (!response.ok) {
-      const errorBody = await response.json();
-      throw new Error(errorBody.detail || "批量分析失敗");
-    }
-
-    const payload = await response.json();
     renderBatchResults(payload.results);
     setStatus(
       batchStatusBox,
       `完成：共 ${payload.requested} 個地址，成功 ${payload.completed}、失敗 ${payload.failed}。`
     );
+    await loadSavedAnalyses();
   } catch (error) {
     setStatus(batchStatusBox, `失敗：${error.message}`, true);
   } finally {
-    batchSubmitBtn.disabled = false;
+    setButtonLoading(batchSubmitBtn, false);
   }
 }
 
+savedTableBody.addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const button = target.closest(".saved-load-btn");
+  if (!button) return;
+  const snapshotId = Number(button.getAttribute("data-snapshot-id"));
+  if (!snapshotId) return;
+  await loadSavedSnapshot(snapshotId, button);
+});
+
 form.addEventListener("submit", handleSubmit);
 batchForm.addEventListener("submit", handleBatchSubmit);
+randomBatchBtn.addEventListener("click", handleRandomBatchAddresses);
+savedSortByInput?.addEventListener("change", loadSavedAnalyses);
+savedSortOrderInput?.addEventListener("change", loadSavedAnalyses);
+loadSavedAnalyses();

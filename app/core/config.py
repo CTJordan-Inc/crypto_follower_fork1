@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     default_lookback_days: int = 90
     sync_cache_ttl_minutes: int = 720
     batch_address_limit: int = 50
+    saved_analysis_limit: int = 100
+    random_address_block_window: int = 160
+    random_address_sample_blocks: int = 12
+    random_address_candidate_multiplier: int = 4
 
     model_config = SettingsConfigDict(
         env_file=".env",

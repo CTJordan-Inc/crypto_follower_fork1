@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, getcontext
+import random
 import time as time_module
 from typing import Any
 
@@ -12,10 +13,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import AddressDailyHolding, AddressSyncState, TokenDailyPrice, WatchlistAddress
+from app.services.analysis_store import get_saved_addresses, save_analysis_snapshot
 from app.services.performance import (
     get_cached_address_performance,
     is_cached_sync_fresh,
     recompute_address_performance,
+    resolve_market_cap_from_response,
 )
 from app.utils.normalizers import normalize_address, normalize_token_symbol
 
@@ -124,14 +127,21 @@ def _build_token_key(
     return f"{symbol}_{suffix}"
 
 
-def _etherscan_params(address: str, action: str, page: int, offset: int) -> dict[str, Any]:
+def _etherscan_params(
+    address: str,
+    action: str,
+    page: int,
+    offset: int,
+    start_block: int = 0,
+    end_block: int = 99_999_999,
+) -> dict[str, Any]:
     params: dict[str, Any] = {
         "chainid": settings.etherscan_chain_id,
         "module": "account",
         "action": action,
         "address": address,
-        "startblock": 0,
-        "endblock": 99_999_999,
+        "startblock": start_block,
+        "endblock": end_block,
         "page": page,
         "offset": offset,
         "sort": "asc",
@@ -140,6 +150,45 @@ def _etherscan_params(address: str, action: str, page: int, offset: int) -> dict
     if settings.etherscan_api_key:
         params["apikey"] = settings.etherscan_api_key
     return params
+
+
+def _etherscan_proxy_params(action: str, **extra: Any) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "chainid": settings.etherscan_chain_id,
+        "module": "proxy",
+        "action": action,
+    }
+    params.update(extra)
+    if settings.etherscan_api_key:
+        params["apikey"] = settings.etherscan_api_key
+    return params
+
+
+def _select_random_recent_blocks(
+    latest_block: int,
+    block_window: int,
+    sample_blocks: int,
+) -> list[int]:
+    earliest_block = max(0, latest_block - max(0, block_window))
+    candidates = list(range(earliest_block, latest_block + 1))
+    if not candidates:
+        return []
+
+    target_size = min(len(candidates), max(1, sample_blocks))
+    selected = random.sample(candidates, k=target_size)
+    selected.sort(reverse=True)
+    return selected
+
+
+def _resolve_effective_end_date(
+    end_date: date,
+    now_dt: datetime | None = None,
+) -> tuple[date, int]:
+    current_dt = now_dt or datetime.now(timezone.utc)
+    effective_end_date = min(end_date, current_dt.date())
+    effective_end_dt = datetime.combine(effective_end_date, time.max, tzinfo=timezone.utc)
+    effective_end_timestamp = int(min(effective_end_dt, current_dt).timestamp())
+    return effective_end_date, effective_end_timestamp
 
 
 def _resolve_etherscan_pagination() -> tuple[int, int]:
@@ -184,7 +233,124 @@ def _etherscan_wait_seconds(attempt: int) -> float:
     return max(0.1, settings.etherscan_backoff_seconds * (2**attempt))
 
 
-def _fetch_etherscan_events(client: httpx.Client, address: str, action: str) -> list[dict[str, Any]]:
+def _etherscan_proxy_json(client: httpx.Client, action: str, **extra: Any) -> dict[str, Any]:
+    max_retries = max(0, settings.etherscan_max_retries)
+    retry_count = 0
+
+    while True:
+        if settings.etherscan_request_interval_seconds > 0:
+            time_module.sleep(settings.etherscan_request_interval_seconds)
+
+        response = client.get(
+            settings.etherscan_base_url,
+            params=_etherscan_proxy_params(action, **extra),
+        )
+
+        if response.status_code == ETHERSCAN_RATE_LIMIT_STATUS or response.status_code >= 500:
+            if retry_count >= max_retries:
+                response.raise_for_status()
+            time_module.sleep(_etherscan_wait_seconds(retry_count))
+            retry_count += 1
+            continue
+
+        response.raise_for_status()
+        payload = response.json()
+        error_payload = payload.get("error")
+        if error_payload:
+            error_text = str(error_payload)
+            if _is_etherscan_rate_limit_error(error_text):
+                if retry_count >= max_retries:
+                    raise ValueError(
+                        "etherscan rate limit reached (3/sec); please retry, "
+                        "or increase ETHERSCAN_REQUEST_INTERVAL_SECONDS"
+                    )
+                time_module.sleep(_etherscan_wait_seconds(retry_count))
+                retry_count += 1
+                continue
+            raise ValueError(f"etherscan proxy request failed: {error_text}")
+
+        return payload
+
+
+def _etherscan_block_json(client: httpx.Client, timestamp: int, closest: str) -> dict[str, Any]:
+    max_retries = max(0, settings.etherscan_max_retries)
+    retry_count = 0
+
+    while True:
+        if settings.etherscan_request_interval_seconds > 0:
+            time_module.sleep(settings.etherscan_request_interval_seconds)
+
+        response = client.get(
+            settings.etherscan_base_url,
+            params={
+                "chainid": settings.etherscan_chain_id,
+                "module": "block",
+                "action": "getblocknobytime",
+                "timestamp": timestamp,
+                "closest": closest,
+                **({"apikey": settings.etherscan_api_key} if settings.etherscan_api_key else {}),
+            },
+        )
+
+        if response.status_code == ETHERSCAN_RATE_LIMIT_STATUS or response.status_code >= 500:
+            if retry_count >= max_retries:
+                response.raise_for_status()
+            time_module.sleep(_etherscan_wait_seconds(retry_count))
+            retry_count += 1
+            continue
+
+        response.raise_for_status()
+        payload = response.json()
+        result = str(payload.get("result", ""))
+        message = str(payload.get("message", ""))
+        if payload.get("status") != "1":
+            error_text = f"{message} {result}"
+            if _is_etherscan_rate_limit_error(error_text):
+                if retry_count >= max_retries:
+                    raise ValueError(
+                        "etherscan rate limit reached (3/sec); please retry, "
+                        "or increase ETHERSCAN_REQUEST_INTERVAL_SECONDS"
+                    )
+                time_module.sleep(_etherscan_wait_seconds(retry_count))
+                retry_count += 1
+                continue
+            raise ValueError(f"etherscan block lookup failed: {error_text}")
+
+        return payload
+
+
+def _get_block_number_by_timestamp(
+    client: httpx.Client,
+    timestamp: int,
+    closest: str,
+) -> int:
+    payload = _etherscan_block_json(client, timestamp, closest)
+    result = payload.get("result")
+    return int(result)
+
+
+def _resolve_block_range(
+    client: httpx.Client,
+    start_date: date,
+    end_date: date,
+) -> tuple[int, int]:
+    current_date = datetime.now(timezone.utc).date()
+    if start_date > current_date:
+        raise ValueError("start_date cannot be in the future")
+    start_timestamp = int(datetime.combine(start_date, time.min, tzinfo=timezone.utc).timestamp())
+    _, end_timestamp = _resolve_effective_end_date(end_date)
+    start_block = _get_block_number_by_timestamp(client, start_timestamp, "after")
+    end_block = _get_block_number_by_timestamp(client, end_timestamp, "before")
+    return max(0, start_block), max(0, end_block)
+
+
+def _fetch_etherscan_events(
+    client: httpx.Client,
+    address: str,
+    action: str,
+    start_block: int = 0,
+    end_block: int = 99_999_999,
+) -> list[dict[str, Any]]:
     page = 1
     offset, page_limit = _resolve_etherscan_pagination()
     all_rows: list[dict[str, Any]] = []
@@ -197,7 +363,14 @@ def _fetch_etherscan_events(client: httpx.Client, address: str, action: str) -> 
 
         response = client.get(
             settings.etherscan_base_url,
-            params=_etherscan_params(address=address, action=action, page=page, offset=offset),
+            params=_etherscan_params(
+                address=address,
+                action=action,
+                page=page,
+                offset=offset,
+                start_block=start_block,
+                end_block=end_block,
+            ),
         )
 
         if response.status_code == ETHERSCAN_RATE_LIMIT_STATUS or response.status_code >= 500:
@@ -243,18 +416,70 @@ def _fetch_etherscan_events(client: httpx.Client, address: str, action: str) -> 
     return all_rows
 
 
+def _load_latest_holding_snapshot_before(
+    db: Session,
+    address: str,
+    before_date: date,
+) -> tuple[date, dict[str, float], dict[str, str | None]] | None:
+    snapshot_date = db.scalar(
+        select(AddressDailyHolding.date)
+        .where(
+            and_(
+                AddressDailyHolding.address == address,
+                AddressDailyHolding.date < before_date,
+            )
+        )
+        .order_by(AddressDailyHolding.date.desc())
+        .limit(1)
+    )
+
+    if snapshot_date is None:
+        return None
+
+    rows = list(
+        db.scalars(
+            select(AddressDailyHolding)
+            .where(
+                and_(
+                    AddressDailyHolding.address == address,
+                    AddressDailyHolding.date == snapshot_date,
+                )
+            )
+            .order_by(AddressDailyHolding.token_symbol.asc())
+        )
+    )
+    if not rows:
+        return None
+
+    balances = {row.token_symbol.upper(): float(row.balance) for row in rows}
+    token_contracts = {row.token_symbol.upper(): row.token_contract for row in rows}
+    token_contracts.setdefault("ETH", None)
+    return snapshot_date, balances, token_contracts
+
+
 def build_daily_balances_from_events(
     address: str,
     start_date: date,
     end_date: date,
     eth_transactions: list[dict[str, Any]],
     token_transfers: list[dict[str, Any]],
+    initial_balances: dict[str, float] | None = None,
+    initial_token_contracts: dict[str, str | None] | None = None,
+    initial_snapshot_date: date | None = None,
 ) -> tuple[dict[date, dict[str, float]], dict[str, str | None]]:
     normalized_address = normalize_address(address)
 
     daily_deltas: dict[date, dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
     token_contracts: dict[str, str | None] = {"ETH": None}
+    if initial_token_contracts:
+        token_contracts.update(initial_token_contracts)
     primary_contract_by_symbol: dict[str, str] = {}
+    for token_key, contract in token_contracts.items():
+        if token_key == "ETH" or not contract:
+            continue
+        if "_" in token_key:
+            continue
+        primary_contract_by_symbol[token_key] = contract
 
     for tx in eth_transactions:
         event_date = _ts_to_date(tx.get("timeStamp", 0))
@@ -302,12 +527,25 @@ def build_daily_balances_from_events(
         token_contracts[token_key] = contract
 
     balance_state: dict[str, Decimal] = defaultdict(Decimal)
+    if initial_balances:
+        for token_key, balance in initial_balances.items():
+            if balance > 0:
+                balance_state[token_key] = Decimal(str(balance))
 
-    for delta_date in sorted(d for d in daily_deltas.keys() if d < start_date):
-        for token_key, delta in daily_deltas[delta_date].items():
-            balance_state[token_key] += delta
-            if abs(balance_state[token_key]) <= BALANCE_EPSILON:
-                balance_state.pop(token_key, None)
+    if initial_balances and initial_snapshot_date is not None:
+        for delta_date in sorted(
+            delta for delta in daily_deltas.keys() if initial_snapshot_date < delta < start_date
+        ):
+            for token_key, delta in daily_deltas[delta_date].items():
+                balance_state[token_key] += delta
+                if abs(balance_state[token_key]) <= BALANCE_EPSILON:
+                    balance_state.pop(token_key, None)
+    elif not initial_balances:
+        for delta_date in sorted(d for d in daily_deltas.keys() if d < start_date):
+            for token_key, delta in daily_deltas[delta_date].items():
+                balance_state[token_key] += delta
+                if abs(balance_state[token_key]) <= BALANCE_EPSILON:
+                    balance_state.pop(token_key, None)
 
     snapshots: dict[date, dict[str, float]] = {}
 
@@ -334,14 +572,97 @@ def _build_token_balance_reference(snapshots: dict[date, dict[str, float]]) -> d
     return dict(reference)
 
 
+def _build_token_active_dates(snapshots: dict[date, dict[str, float]]) -> dict[str, set[date]]:
+    active_dates: dict[str, set[date]] = defaultdict(set)
+    for row_date, balances in snapshots.items():
+        for token_key, balance in balances.items():
+            if balance > 0:
+                active_dates[token_key].add(row_date)
+    return dict(active_dates)
+
+
+def _load_recent_cached_coingecko_prices(
+    db: Session,
+    token_keys: list[str],
+    as_of_date: date,
+) -> dict[str, float]:
+    if not token_keys:
+        return {}
+
+    rows = list(
+        db.scalars(
+            select(TokenDailyPrice)
+            .where(
+                and_(
+                    TokenDailyPrice.token_symbol.in_(token_keys),
+                    TokenDailyPrice.source == "coingecko",
+                    TokenDailyPrice.date <= as_of_date,
+                )
+            )
+            .order_by(TokenDailyPrice.date.desc(), TokenDailyPrice.token_symbol.asc())
+        )
+    )
+
+    latest_prices: dict[str, float] = {}
+    for row in rows:
+        token_key = row.token_symbol.upper()
+        if token_key not in latest_prices:
+            latest_prices[token_key] = float(row.price_usd)
+    return latest_prices
+
+
+def _load_cached_coingecko_price_series(
+    db: Session,
+    token_keys: list[str],
+    start_date: date,
+    end_date: date,
+) -> dict[str, dict[date, float]]:
+    if not token_keys:
+        return {}
+
+    rows = list(
+        db.scalars(
+            select(TokenDailyPrice)
+            .where(
+                and_(
+                    TokenDailyPrice.token_symbol.in_(token_keys),
+                    TokenDailyPrice.source == "coingecko",
+                    TokenDailyPrice.date >= start_date,
+                    TokenDailyPrice.date <= end_date,
+                )
+            )
+            .order_by(TokenDailyPrice.token_symbol.asc(), TokenDailyPrice.date.asc())
+        )
+    )
+
+    price_map: dict[str, dict[date, float]] = defaultdict(dict)
+    for row in rows:
+        price_map[row.token_symbol.upper()][row.date] = float(row.price_usd)
+    return dict(price_map)
+
+
+def _series_covers_active_dates(series: dict[date, float], active_dates: set[date]) -> bool:
+    if not active_dates:
+        return True
+    if not series:
+        return False
+    return active_dates.issubset(series.keys())
+
+
 def _fetch_spot_prices(
+    db: Session,
     client: httpx.Client,
     token_contracts: dict[str, str | None],
     token_reference: dict[str, float],
+    as_of_date: date,
 ) -> dict[str, float]:
-    spot_prices: dict[str, float] = {}
+    spot_prices = _load_recent_cached_coingecko_prices(
+        db=db,
+        token_keys=sorted(token_reference.keys()),
+        as_of_date=as_of_date,
+    )
 
-    if "ETH" in token_reference:
+    if "ETH" in token_reference and "ETH" not in spot_prices:
         payload = _coingecko_get_json(
             client,
             f"{settings.coingecko_base_url}/simple/price",
@@ -352,7 +673,9 @@ def _fetch_spot_prices(
             spot_prices["ETH"] = float(eth_price)
 
     contract_to_tokens: dict[str, list[str]] = defaultdict(list)
-    candidate_tokens = [token_key for token_key in token_reference if token_key != "ETH"]
+    candidate_tokens = [
+        token_key for token_key in token_reference if token_key != "ETH" and token_key not in spot_prices
+    ]
     candidate_tokens.sort(key=lambda token_key: token_reference.get(token_key, 0.0), reverse=True)
     candidate_tokens = candidate_tokens[: max(1, settings.coingecko_spot_contract_limit)]
 
@@ -551,10 +874,7 @@ def _replace_holdings(
     end_date: date,
     snapshots: dict[date, dict[str, float]],
     token_contracts: dict[str, str | None],
-    selected_tokens: list[str],
 ) -> None:
-    selected_set = set(selected_tokens)
-
     db.execute(
         delete(AddressDailyHolding).where(
             and_(
@@ -568,8 +888,6 @@ def _replace_holdings(
     for row_date, balances in snapshots.items():
         for token_key, balance in balances.items():
             if balance <= 0:
-                continue
-            if token_key not in selected_set:
                 continue
 
             db.add(
@@ -642,12 +960,109 @@ def _upsert_sync_state(
         sync_state.last_runtime_seconds = runtime_seconds
         sync_state.last_status = status
         sync_state.last_error = None
-    elif sync_state.last_status is None:
+    else:
         sync_state.last_runtime_seconds = runtime_seconds
         sync_state.last_status = status
         sync_state.last_error = (error or "")[:255] or None
 
     db.commit()
+
+
+def _sample_recent_sender_addresses(
+    db: Session,
+    target_count: int,
+    exclude_saved: bool = True,
+) -> list[str]:
+    if not settings.etherscan_api_key:
+        raise ValueError("ETHERSCAN_API_KEY is required for random address generation")
+
+    excluded_addresses = get_saved_addresses(db) if exclude_saved else set()
+    sampled_addresses: list[str] = []
+    seen = set(excluded_addresses)
+
+    with httpx.Client(timeout=settings.http_timeout_seconds) as client:
+        latest_block_payload = _etherscan_proxy_json(client, "eth_blockNumber")
+        latest_block = int(latest_block_payload["result"], 16)
+        candidate_blocks = _select_random_recent_blocks(
+            latest_block=latest_block,
+            block_window=settings.random_address_block_window,
+            sample_blocks=settings.random_address_sample_blocks,
+        )
+
+        for block_number in candidate_blocks:
+            block_payload = _etherscan_proxy_json(
+                client,
+                "eth_getBlockByNumber",
+                tag=hex(block_number),
+                boolean="true",
+            )
+            block = block_payload.get("result") or {}
+            transactions = list(block.get("transactions") or [])
+            random.shuffle(transactions)
+
+            for transaction in transactions:
+                from_address = normalize_address(transaction.get("from", ""))
+                if not from_address or from_address in seen:
+                    continue
+                seen.add(from_address)
+                sampled_addresses.append(from_address)
+                if len(sampled_addresses) >= target_count:
+                    return sampled_addresses
+
+    return sampled_addresses
+
+
+def generate_random_recent_addresses(
+    db: Session,
+    count: int,
+    start_date: date,
+    end_date: date,
+    top_n_tokens: int,
+    min_market_cap_usd: float = 0,
+    market_cap_basis: str = "max_nav",
+    exclude_saved: bool = True,
+) -> list[str]:
+    target_count = min(max(1, count), settings.batch_address_limit)
+    basis = market_cap_basis if market_cap_basis in {"max_nav", "average_nav"} else "max_nav"
+    candidate_count = target_count
+    if min_market_cap_usd > 0:
+        candidate_count = min(
+            settings.batch_address_limit * settings.random_address_candidate_multiplier,
+            target_count * settings.random_address_candidate_multiplier,
+        )
+
+    candidate_addresses = _sample_recent_sender_addresses(
+        db=db,
+        target_count=max(target_count, candidate_count),
+        exclude_saved=exclude_saved,
+    )
+
+    if min_market_cap_usd <= 0:
+        return candidate_addresses[:target_count]
+
+    qualified_addresses: list[str] = []
+    for address in candidate_addresses:
+        try:
+            payload = load_or_sync_address_performance(
+                db,
+                raw_address=address,
+                start_date=start_date,
+                end_date=end_date,
+                top_n_tokens=top_n_tokens,
+                refresh=False,
+            )
+        except ValueError:
+            continue
+
+        market_cap_usd = resolve_market_cap_from_response(payload, basis=basis)
+        if market_cap_usd is None or market_cap_usd < min_market_cap_usd:
+            continue
+
+        qualified_addresses.append(address)
+        if len(qualified_addresses) >= target_count:
+            break
+
+    return qualified_addresses
 
 
 def sync_address_from_network_and_recompute(
@@ -664,19 +1079,63 @@ def sync_address_from_network_and_recompute(
         raise ValueError("ETHERSCAN_API_KEY is required for network query")
 
     address = normalize_address(raw_address)
+    effective_end_date, _ = _resolve_effective_end_date(end_date)
+    if effective_end_date < start_date:
+        raise ValueError("start_date cannot be in the future")
     started_at = time_module.perf_counter()
 
     try:
         with httpx.Client(timeout=settings.http_timeout_seconds) as client:
-            eth_transactions = _fetch_etherscan_events(client, address, action="txlist")
-            token_transfers = _fetch_etherscan_events(client, address, action="tokentx")
+            base_snapshot = _load_latest_holding_snapshot_before(db, address, start_date)
+            initial_balances: dict[str, float] | None = None
+            initial_token_contracts: dict[str, str | None] | None = None
+
+            if base_snapshot is not None:
+                snapshot_date, balances, token_contracts = base_snapshot
+                initial_balances = balances
+                initial_token_contracts = token_contracts
+
+            if base_snapshot is not None:
+                next_date = snapshot_date + timedelta(days=1)
+                if next_date <= effective_end_date:
+                    start_block, end_block = _resolve_block_range(client, next_date, effective_end_date)
+                    should_fetch_events = True
+                else:
+                    start_block, end_block = 0, 0
+                    should_fetch_events = False
+            else:
+                _, end_block = _resolve_block_range(client, start_date, effective_end_date)
+                start_block = 0
+                should_fetch_events = True
+
+            if should_fetch_events and start_block <= end_block:
+                eth_transactions = _fetch_etherscan_events(
+                    client,
+                    address,
+                    action="txlist",
+                    start_block=start_block,
+                    end_block=end_block,
+                )
+                token_transfers = _fetch_etherscan_events(
+                    client,
+                    address,
+                    action="tokentx",
+                    start_block=start_block,
+                    end_block=end_block,
+                )
+            else:
+                eth_transactions = []
+                token_transfers = []
 
             snapshots, token_contracts = build_daily_balances_from_events(
                 address=address,
                 start_date=start_date,
-                end_date=end_date,
+                end_date=effective_end_date,
                 eth_transactions=eth_transactions,
                 token_transfers=token_transfers,
+                initial_balances=initial_balances,
+                initial_token_contracts=initial_token_contracts,
+                initial_snapshot_date=snapshot_date if base_snapshot is not None else None,
             )
 
             if not snapshots:
@@ -687,19 +1146,42 @@ def sync_address_from_network_and_recompute(
                 raise ValueError("network query found no non-zero balances in this time range")
 
             token_reference = _build_token_balance_reference(snapshots)
-            spot_prices = _fetch_spot_prices(client, token_contracts, token_reference)
+            token_active_dates = _build_token_active_dates(snapshots)
+            spot_prices = _fetch_spot_prices(
+                db,
+                client,
+                token_contracts,
+                token_reference,
+                as_of_date=effective_end_date,
+            )
             selected_tokens = _select_tokens_for_price_fetch(
                 token_reference=token_reference,
                 spot_prices=spot_prices,
                 top_n_tokens=top_n_tokens,
             )
 
-            price_map = _build_stablecoin_price_map(selected_tokens, start_date, end_date)
+            price_map = _build_stablecoin_price_map(selected_tokens, start_date, effective_end_date)
+            cached_price_map = _load_cached_coingecko_price_series(
+                db=db,
+                token_keys=[token_key for token_key in selected_tokens if token_key not in price_map],
+                start_date=start_date,
+                end_date=effective_end_date,
+            )
             rate_limited_tokens: list[str] = []
 
             for token_key in selected_tokens:
                 if token_key in price_map:
                     continue
+
+                cached_series = cached_price_map.get(token_key, {})
+                if _series_covers_active_dates(
+                    cached_series,
+                    token_active_dates.get(token_key, set()),
+                ):
+                    price_map[token_key] = cached_series
+                    continue
+
+                merged_series = dict(cached_series)
 
                 try:
                     token_prices = _fetch_token_daily_prices(
@@ -707,16 +1189,20 @@ def sync_address_from_network_and_recompute(
                         token_key=token_key,
                         contract=token_contracts.get(token_key),
                         start_date=start_date,
-                        end_date=end_date,
+                        end_date=effective_end_date,
                     )
                 except httpx.HTTPStatusError as error:
                     if error.response.status_code == COINGECKO_RATE_LIMIT_STATUS:
                         rate_limited_tokens.append(token_key)
+                        if merged_series:
+                            price_map[token_key] = merged_series
                         continue
                     raise
 
                 if token_prices:
-                    price_map[token_key] = token_prices
+                    merged_series.update(token_prices)
+                if merged_series:
+                    price_map[token_key] = merged_series
 
             if not price_map:
                 detail = ""
@@ -767,14 +1253,14 @@ def sync_address_from_network_and_recompute(
         raise ValueError(f"network query failed: {error}") from error
 
     _ensure_watchlist_entry(db, address)
-    _replace_holdings(db, address, start_date, end_date, snapshots, token_contracts, selected_tokens)
-    _replace_prices(db, start_date, end_date, price_map)
+    _replace_holdings(db, address, start_date, effective_end_date, snapshots, token_contracts)
+    _replace_prices(db, start_date, effective_end_date, price_map)
     runtime_seconds = time_module.perf_counter() - started_at
     _upsert_sync_state(
         db,
         address=address,
         start_date=start_date,
-        end_date=end_date,
+        end_date=effective_end_date,
         runtime_seconds=runtime_seconds,
         status="success",
     )
@@ -783,7 +1269,7 @@ def sync_address_from_network_and_recompute(
         db,
         raw_address=address,
         start_date=start_date,
-        end_date=end_date,
+        end_date=effective_end_date,
         top_n_tokens=top_n_tokens,
         runtime_seconds=runtime_seconds,
         source="network-sync",
@@ -802,22 +1288,27 @@ def load_or_sync_address_performance(
     started_at = time_module.perf_counter()
 
     if not refresh and is_cached_sync_fresh(db, address, start_date, end_date):
-        return get_cached_address_performance(
+        payload = get_cached_address_performance(
             db,
             raw_address=address,
             start_date=start_date,
             end_date=end_date,
+            top_n_tokens=top_n_tokens,
             runtime_seconds=time_module.perf_counter() - started_at,
             source="cache-hit",
         )
+        save_analysis_snapshot(db, payload, top_n_tokens=top_n_tokens)
+        return payload
 
-    return sync_address_from_network_and_recompute(
+    payload = sync_address_from_network_and_recompute(
         db,
         raw_address=address,
         start_date=start_date,
         end_date=end_date,
         top_n_tokens=top_n_tokens,
     )
+    save_analysis_snapshot(db, payload, top_n_tokens=top_n_tokens)
+    return payload
 
 
 def batch_load_or_sync_address_performance(
@@ -851,6 +1342,8 @@ def batch_load_or_sync_address_performance(
                 {
                     "address": address,
                     "success": True,
+                    "market_cap_usd": payload["meta"].get("address_market_cap_usd"),
+                    "market_cap_basis": payload["meta"].get("address_market_cap_basis"),
                     "nav_end_usd": nav_end_usd,
                     "total_return": payload["metrics"]["total_return"],
                     "cagr": payload["metrics"]["cagr"],
@@ -869,6 +1362,8 @@ def batch_load_or_sync_address_performance(
                 {
                     "address": address,
                     "success": False,
+                    "market_cap_usd": None,
+                    "market_cap_basis": None,
                     "nav_end_usd": None,
                     "total_return": None,
                     "cagr": None,

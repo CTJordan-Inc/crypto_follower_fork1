@@ -15,6 +15,8 @@
 - 拆解回報來源：`市場漲跌` vs `淨轉入/轉出`。
 - 提供詮釋說明，避免把「搬倉造成的 NAV 變化」誤判成持幣績效。
 - 支援最多 50 個地址的批量分析面板。
+- 可從近期鏈上活動自動抽樣 50 個地址，直接帶入批量分析。
+- 會自動保存每次分析結果，之後可直接回看同地址、同區間的結果。
 - 提供資料品質標籤：價格來源、標註來源、疑似交易所/合約旗標。
 - 提供候選地址推薦 API（以市值與穩定成長分數排序）。
 
@@ -55,6 +57,9 @@
    COINGECKO_CONTRACT_CHUNK_SIZE=40
    SYNC_CACHE_TTL_MINUTES=720
    BATCH_ADDRESS_LIMIT=50
+   SAVED_ANALYSIS_LIMIT=100
+   RANDOM_ADDRESS_BLOCK_WINDOW=160
+   RANDOM_ADDRESS_SAMPLE_BLOCKS=40
    ```
 
    註：Etherscan 會限制 `page * offset <= 10000`，建議維持預設 `offset=1000`。
@@ -82,11 +87,26 @@
 4. 系統會呼叫 `/api/v1/performance/{address}/network/recompute`
 5. 於頁面顯示 NAV 曲線、資金流拆解、行為判讀與詮釋說明
 
+### 批量地址抽樣
+
+- Dashboard 的「隨機產生 50 地址」會呼叫 `GET /api/v1/performance/random-addresses?count=50&exclude_saved=true`
+- 來源是 Etherscan proxy 的近期區塊交易發送者（`from` address）
+- 預設排除已保存過分析結果的地址，避免一直重複分析同一批
+- 可設定最低地址市值門檻；系統會先用同一區間跑一次地址分析，再以地址市值過濾
+- 地址市值口徑可選：
+  - `max_nav`：區間內最大 NAV（預設，較保守）
+  - `average_nav`：區間內平均 NAV
+- 若近期區塊內可用地址不足，回傳數量可能小於 50
+
 ### 快取策略
 
 - `POST /api/v1/performance/{address}/network/recompute` 預設 `refresh=false`
 - 若同地址與區間在 `SYNC_CACHE_TTL_MINUTES` 內已同步成功，會直接回傳快取結果
 - 若要強制更新鏈上資料，勾選 dashboard 的「強制重抓鏈上與價格資料」
+- CoinGecko 日價格也會重用本地已存在的 `coingecko` 價格資料；同一批熱門代幣在後續地址分析時通常會快很多
+- sync 時現在會保存完整日持倉快照，而不是只保存 `Top N`，避免後續分析因舊快取缺 token 而失真
+- 若某地址過去已同步過更早日期，系統會從最近的本地持倉快照接續增量同步，而不是每次都從 genesis replay
+- 但對於第一次分析的全新地址，為了保證起始持倉正確，仍需走較慢的冷啟動全歷史路徑
 
 ### 行為判讀口徑
 
@@ -123,6 +143,11 @@
   - 一次最多 50 個地址
   - 預設逐個使用快取；只有缺資料或勾選 `refresh=true` 時才會重抓
   - 適合先把候選清單跑過一輪，再回到單地址細看
+- `GET /api/v1/performance/random-addresses`
+  - 從近期 Ethereum 區塊隨機抽樣地址
+  - query params:
+    - `count`：1~50
+    - `exclude_saved`：是否排除已保存分析的地址，預設 `true`
 
 範例：
 
@@ -137,6 +162,22 @@ curl -X POST http://127.0.0.1:8000/api/v1/performance/batch/network/recompute \
     "refresh": false
   }'
 ```
+
+## 保存分析結果
+
+- 每次單地址分析與批量分析，只要成功回傳結果，就會自動保存一份 snapshot
+- 保存鍵為：`address + start_date + end_date + top_n_tokens`
+- 若同一組條件再次分析，會更新既有 snapshot，不會重複新增
+- Dashboard 下方的「已保存分析」可直接載入舊結果，不需要重新打外部 API
+- 「已保存分析」可依 `保存時間 / 總報酬 / 地址市值` 排序
+- 表格中的「地址市值」目前顯示區間內最大 NAV
+
+相關 API：
+
+- `GET /api/v1/performance/saved?limit=50&sort_by=saved_at&sort_order=desc`
+  - 列出最近保存的分析摘要
+- `GET /api/v1/performance/saved/{snapshot_id}`
+  - 直接讀取當次保存的完整分析 payload
 
 ### 快速示例（先跑通單一地址績效）
 

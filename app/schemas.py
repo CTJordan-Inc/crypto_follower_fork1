@@ -195,6 +195,10 @@ class PerformanceMeta(BaseModel):
     cache_age_minutes: float | None
     source: str
     runtime_seconds: float | None
+    address_market_cap_usd: float | None
+    address_market_cap_basis: str
+    address_peak_nav_usd: float | None
+    address_average_nav_usd: float | None
 
 
 class PerformanceResponse(BaseModel):
@@ -213,6 +217,8 @@ class PerformanceResponse(BaseModel):
 class BatchPerformanceItem(BaseModel):
     address: str
     success: bool
+    market_cap_usd: float | None = None
+    market_cap_basis: str | None = None
     nav_end_usd: float | None = None
     total_return: float | None = None
     cagr: float | None = None
@@ -232,3 +238,35 @@ class BatchPerformanceResponse(BaseModel):
     completed: int
     failed: int
     results: list[BatchPerformanceItem]
+
+
+class SavedAnalysisSummary(BaseModel):
+    id: int
+    address: str
+    start_date: date
+    end_date: date
+    top_n_tokens: int
+    market_cap_usd: float | None
+    market_cap_basis: str
+    nav_end_usd: float | None
+    total_return: float | None
+    cagr: float | None
+    sharpe: float | None
+    behavior_style: str | None
+    return_driver: str | None
+    analysis_source: str | None
+    saved_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SavedAnalysisListResponse(BaseModel):
+    items: list[SavedAnalysisSummary]
+
+
+class RandomAddressesResponse(BaseModel):
+    count: int
+    addresses: list[str]
+    source: str
+    min_market_cap_usd: float
+    market_cap_basis: str

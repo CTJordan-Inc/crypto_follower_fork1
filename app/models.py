@@ -103,3 +103,28 @@ class AddressSyncState(Base):
     last_runtime_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     last_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class SavedAnalysisSnapshot(Base):
+    __tablename__ = "saved_analysis_snapshots"
+    __table_args__ = (
+        UniqueConstraint("address", "start_date", "end_date", "top_n_tokens", name="uq_saved_analysis"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    address: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    chain: Mapped[str] = mapped_column(String(30), nullable=False, default="ethereum")
+    start_date: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    top_n_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    nav_end_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cagr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    behavior_style: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    return_driver: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    analysis_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    saved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )

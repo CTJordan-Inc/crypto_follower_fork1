@@ -42,6 +42,13 @@ class HoldingRecord:
     balance: float
 
 
+def _iter_dates(start_date: date, end_date: date):
+    current = start_date
+    while current <= end_date:
+        yield current
+        current = current.fromordinal(current.toordinal() + 1)
+
+
 def _source_rank(source: str) -> int:
     return SOURCE_PRIORITY.get(source.lower(), 999)
 
@@ -140,10 +147,16 @@ def _select_tokens(
 def _build_daily_holding_view(
     holdings: list[AddressDailyHolding],
     selected_tokens: list[str],
+    start_date: date,
+    end_date: date,
 ) -> tuple[dict[date, list[HoldingRecord]], dict[date, dict[str, float]]]:
     selected_token_set = set(selected_tokens)
     holdings_by_date: dict[date, list[HoldingRecord]] = defaultdict(list)
     balance_snapshots: dict[date, dict[str, float]] = defaultdict(dict)
+
+    for row_date in _iter_dates(start_date, end_date):
+        holdings_by_date[row_date]
+        balance_snapshots[row_date]
 
     for row in holdings:
         token = row.token_symbol.upper()
@@ -245,6 +258,53 @@ def _round_or_none(value: float | None, digits: int = 6) -> float | None:
     if value is None:
         return None
     return round(value, digits)
+
+
+def _build_market_cap_summary(nav_points: list[NavPointData]) -> dict[str, float | str | None]:
+    if not nav_points:
+        return {
+            "address_market_cap_usd": None,
+            "address_market_cap_basis": "max_nav",
+            "address_peak_nav_usd": None,
+            "address_average_nav_usd": None,
+        }
+
+    nav_values = [point.nav_usd for point in nav_points]
+    peak_nav = max(nav_values)
+    average_nav = fmean(nav_values)
+    return {
+        "address_market_cap_usd": _round_or_none(peak_nav, 2),
+        "address_market_cap_basis": "max_nav",
+        "address_peak_nav_usd": _round_or_none(peak_nav, 2),
+        "address_average_nav_usd": _round_or_none(average_nav, 2),
+    }
+
+
+def resolve_market_cap_from_response(
+    payload: dict[str, Any],
+    basis: str = "max_nav",
+) -> float | None:
+    meta = payload.get("meta") or {}
+    if basis == "average_nav":
+        average_nav = meta.get("address_average_nav_usd")
+        if average_nav is not None:
+            return float(average_nav)
+    else:
+        peak_nav = meta.get("address_peak_nav_usd")
+        if peak_nav is not None:
+            return float(peak_nav)
+
+    nav_curve = payload.get("nav_curve") or []
+    nav_values = [
+        float(row.get("nav_usd"))
+        for row in nav_curve
+        if isinstance(row, dict) and row.get("nav_usd") is not None
+    ]
+    if not nav_values:
+        return None
+    if basis == "average_nav":
+        return _round_or_none(fmean(nav_values), 2)
+    return _round_or_none(max(nav_values), 2)
 
 
 def _build_behavior_analysis(
@@ -381,6 +441,7 @@ def _build_meta(
     address: str,
     source: str,
     used_cache: bool,
+    nav_points: list[NavPointData],
     runtime_seconds: float | None = None,
 ) -> dict[str, Any]:
     cache_age_minutes = None
@@ -391,12 +452,14 @@ def _build_meta(
             synced_at = synced_at.replace(tzinfo=timezone.utc)
         cache_age_minutes = (datetime.now(timezone.utc) - synced_at).total_seconds() / 60
 
-    return {
+    meta = {
         "used_cache": used_cache,
         "cache_age_minutes": _round_or_none(cache_age_minutes, 2),
         "source": source,
         "runtime_seconds": _round_or_none(runtime_seconds, 3),
     }
+    meta.update(_build_market_cap_summary(nav_points))
+    return meta
 
 
 def _build_interpretations(
@@ -467,6 +530,7 @@ def _build_performance_response(
         address=address,
         source=source,
         used_cache=used_cache,
+        nav_points=nav_points,
         runtime_seconds=runtime_seconds,
     )
 
@@ -561,7 +625,12 @@ def recompute_address_performance(
     prices = _load_prices(db, token_symbols, start_date, end_date)
     price_lookup = _build_price_lookup(prices)
     selected_tokens = _select_tokens(holdings, price_lookup, top_n_tokens=top_n_tokens)
-    holdings_by_date, balance_snapshots = _build_daily_holding_view(holdings, selected_tokens)
+    holdings_by_date, balance_snapshots = _build_daily_holding_view(
+        holdings,
+        selected_tokens,
+        start_date=start_date,
+        end_date=end_date,
+    )
     nav_points, price_sources, missing_price_days = _compute_nav_curve(holdings_by_date, price_lookup)
 
     if not nav_points:
@@ -588,6 +657,7 @@ def get_cached_address_performance(
     raw_address: str,
     start_date: date,
     end_date: date,
+    top_n_tokens: int = 10,
     runtime_seconds: float | None = None,
     source: str = "cache",
 ) -> dict[str, Any]:
@@ -624,13 +694,16 @@ def get_cached_address_performance(
     if not holdings:
         raise ValueError("no holdings found for cached nav")
 
-    selected_tokens = sorted({row.token_symbol.upper() for row in holdings})
-    balance_snapshots: dict[date, dict[str, float]] = defaultdict(dict)
-    for row in holdings:
-        balance_snapshots[row.date][row.token_symbol.upper()] = float(row.balance)
-
-    prices = _load_prices(db, selected_tokens, start_date, end_date)
+    token_symbols = sorted({row.token_symbol.upper() for row in holdings})
+    prices = _load_prices(db, token_symbols, start_date, end_date)
     price_lookup = _build_price_lookup(prices)
+    selected_tokens = _select_tokens(holdings, price_lookup, top_n_tokens=top_n_tokens)
+    _, balance_snapshots = _build_daily_holding_view(
+        holdings,
+        selected_tokens,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     price_source_set: set[str] = set()
     for row in nav_rows:
