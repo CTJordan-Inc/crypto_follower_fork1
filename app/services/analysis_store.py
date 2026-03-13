@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from datetime import date, datetime
 from typing import Any
@@ -25,11 +26,34 @@ def _make_json_safe(payload: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(payload, default=_json_default))
 
 
+def hydrate_saved_performance_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    hydrated_payload = deepcopy(payload)
+    meta = dict(hydrated_payload.get("meta") or {})
+    market_cap_basis = str(meta.get("address_market_cap_basis") or "max_nav")
+    peak_nav = resolve_market_cap_from_response(hydrated_payload, basis="max_nav")
+    average_nav = resolve_market_cap_from_response(hydrated_payload, basis="average_nav")
+
+    if meta.get("address_peak_nav_usd") is None:
+        meta["address_peak_nav_usd"] = peak_nav
+    if meta.get("address_average_nav_usd") is None:
+        meta["address_average_nav_usd"] = average_nav
+    if meta.get("address_market_cap_basis") is None:
+        meta["address_market_cap_basis"] = market_cap_basis
+    if meta.get("address_market_cap_usd") is None:
+        meta["address_market_cap_usd"] = (
+            average_nav if market_cap_basis == "average_nav" else peak_nav
+        )
+
+    hydrated_payload["meta"] = meta
+    return hydrated_payload
+
+
 def save_analysis_snapshot(
     db: Session,
     payload: dict[str, Any],
     top_n_tokens: int,
 ) -> SavedAnalysisSnapshot:
+    payload = hydrate_saved_performance_payload(payload)
     address = normalize_address(payload["address"])
     snapshot = db.scalar(
         select(SavedAnalysisSnapshot).where(
@@ -124,6 +148,23 @@ def list_saved_analysis_summaries(
 def get_saved_analysis_snapshot(db: Session, snapshot_id: int) -> SavedAnalysisSnapshot | None:
     return db.scalar(
         select(SavedAnalysisSnapshot).where(SavedAnalysisSnapshot.id == snapshot_id)
+    )
+
+
+def get_saved_analysis_snapshot_by_key(
+    db: Session,
+    address: str,
+    start_date: date,
+    end_date: date,
+    top_n_tokens: int,
+) -> SavedAnalysisSnapshot | None:
+    return db.scalar(
+        select(SavedAnalysisSnapshot).where(
+            SavedAnalysisSnapshot.address == normalize_address(address),
+            SavedAnalysisSnapshot.start_date == start_date,
+            SavedAnalysisSnapshot.end_date == end_date,
+            SavedAnalysisSnapshot.top_n_tokens == top_n_tokens,
+        )
     )
 
 

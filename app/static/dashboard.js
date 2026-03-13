@@ -354,7 +354,7 @@ async function handleRandomBatchAddresses() {
   setStatus(
     batchStatusBox,
     minMarketCapUsd > 0
-      ? `正在取樣並篩掉地址市值低於 ${formatUsd(minMarketCapUsd)} 的地址...`
+      ? `正在取樣並做快速地址市值預篩（避免逾時）...`
       : "正在從近期鏈上活動取樣地址..."
   );
   try {
@@ -374,7 +374,7 @@ async function handleRandomBatchAddresses() {
     setStatus(
       batchStatusBox,
       payload.count < 50
-        ? `已填入 ${payload.count} 個地址；篩選後不足 50。地址市值口徑：${formatMarketCapBasis(payload.market_cap_basis)}，最低門檻：${formatUsd(payload.min_market_cap_usd)}`
+        ? `已填入 ${payload.count} 個地址；快速預篩後不足 50。地址市值口徑：${formatMarketCapBasis(payload.market_cap_basis)}，最低門檻：${formatUsd(payload.min_market_cap_usd)}`
         : `已填入 ${payload.count} 個地址。地址市值口徑：${formatMarketCapBasis(payload.market_cap_basis)}，最低門檻：${formatUsd(payload.min_market_cap_usd)}`
     );
   } catch (error) {

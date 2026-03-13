@@ -3,8 +3,10 @@ from datetime import date, datetime, timezone
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+import app.services.network_sync as network_sync
 from app.models import AddressDailyHolding, Base
 from app.services.network_sync import (
+    _estimate_market_cap_from_snapshots,
     _build_token_active_dates,
     _build_stablecoin_price_map,
     _iter_chunks,
@@ -234,6 +236,61 @@ def test_replace_holdings_persists_all_positive_tokens() -> None:
         assert [row.token_symbol for row in rows] == ["ETH", "MEME", "ETH", "MEME", "USDC"]
 
 
+def test_generate_random_recent_addresses_limits_unsaved_network_screening(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+
+    screened_addresses: list[str] = []
+    original_limit = settings.random_address_network_screen_limit
+    original_budget = settings.random_address_screen_time_budget_seconds
+    original_pages = settings.random_address_screen_max_pages
+
+    try:
+        settings.random_address_network_screen_limit = 2
+        settings.random_address_screen_time_budget_seconds = 999
+        settings.random_address_screen_max_pages = 1
+
+        monkeypatch.setattr(
+            network_sync,
+            "_sample_recent_sender_addresses",
+            lambda **kwargs: ["0xaaa", "0xbbb", "0xccc", "0xddd"],
+        )
+        monkeypatch.setattr(
+            network_sync,
+            "get_saved_analysis_snapshot_by_key",
+            lambda *args, **kwargs: None,
+        )
+
+        def fake_estimate(**kwargs):
+            screened_addresses.append(kwargs["address"])
+            return 20_000.0
+
+        monkeypatch.setattr(
+            network_sync,
+            "_estimate_address_market_cap_from_network",
+            fake_estimate,
+        )
+
+        with Session(engine) as session:
+            addresses = network_sync.generate_random_recent_addresses(
+                db=session,
+                count=3,
+                start_date=date(2025, 1, 1),
+                end_date=date(2025, 3, 31),
+                top_n_tokens=10,
+                min_market_cap_usd=10_000,
+                market_cap_basis="max_nav",
+                exclude_saved=True,
+            )
+
+        assert screened_addresses == ["0xaaa", "0xbbb"]
+        assert addresses == ["0xaaa", "0xbbb"]
+    finally:
+        settings.random_address_network_screen_limit = original_limit
+        settings.random_address_screen_time_budget_seconds = original_budget
+        settings.random_address_screen_max_pages = original_pages
+
+
 def test_build_daily_balances_can_start_from_initial_snapshot() -> None:
     snapshots, token_contracts = build_daily_balances_from_events(
         address="0xabc",
@@ -296,3 +353,14 @@ def test_resolve_effective_end_date_clamps_future_timestamp() -> None:
 
     assert effective_end_date == date(2025, 1, 10)
     assert effective_end_timestamp == int(datetime(2025, 1, 10, 12, 0, tzinfo=timezone.utc).timestamp())
+
+
+def test_estimate_market_cap_from_snapshots_supports_max_and_average_basis() -> None:
+    snapshots = {
+        date(2025, 1, 1): {"ETH": 1.0, "USDC": 1000.0},
+        date(2025, 1, 2): {"ETH": 2.0, "USDC": 500.0},
+    }
+    spot_prices = {"ETH": 3000.0}
+
+    assert _estimate_market_cap_from_snapshots(snapshots, spot_prices, basis="max_nav") == 6500.0
+    assert _estimate_market_cap_from_snapshots(snapshots, spot_prices, basis="average_nav") == 5250.0

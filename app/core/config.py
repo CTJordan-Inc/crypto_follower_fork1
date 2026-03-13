@@ -35,7 +35,10 @@ class Settings(BaseSettings):
     saved_analysis_limit: int = 100
     random_address_block_window: int = 160
     random_address_sample_blocks: int = 12
-    random_address_candidate_multiplier: int = 4
+    random_address_candidate_multiplier: int = 2
+    random_address_screen_time_budget_seconds: int = 90
+    random_address_network_screen_limit: int = 8
+    random_address_screen_max_pages: int = 1
 
     model_config = SettingsConfigDict(
         env_file=".env",

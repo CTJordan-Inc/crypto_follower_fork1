@@ -13,7 +13,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import AddressDailyHolding, AddressSyncState, TokenDailyPrice, WatchlistAddress
-from app.services.analysis_store import get_saved_addresses, save_analysis_snapshot
+from app.services.analysis_store import (
+    get_saved_addresses,
+    get_saved_analysis_snapshot_by_key,
+    save_analysis_snapshot,
+)
 from app.services.performance import (
     get_cached_address_performance,
     is_cached_sync_fresh,
@@ -350,9 +354,12 @@ def _fetch_etherscan_events(
     action: str,
     start_block: int = 0,
     end_block: int = 99_999_999,
+    max_pages: int | None = None,
 ) -> list[dict[str, Any]]:
     page = 1
     offset, page_limit = _resolve_etherscan_pagination()
+    if max_pages is not None:
+        page_limit = min(page_limit, max(1, max_pages))
     all_rows: list[dict[str, Any]] = []
     max_retries = max(0, settings.etherscan_max_retries)
     retry_count = 0
@@ -579,6 +586,36 @@ def _build_token_active_dates(snapshots: dict[date, dict[str, float]]) -> dict[s
             if balance > 0:
                 active_dates[token_key].add(row_date)
     return dict(active_dates)
+
+
+def _estimate_market_cap_from_snapshots(
+    snapshots: dict[date, dict[str, float]],
+    spot_prices: dict[str, float],
+    basis: str,
+) -> float | None:
+    if not snapshots:
+        return None
+
+    stable_set = {symbol.upper() for symbol in settings.stablecoins}
+    nav_values: list[float] = []
+    for balances in snapshots.values():
+        nav_value = 0.0
+        for token_key, balance in balances.items():
+            if token_key in stable_set:
+                nav_value += balance
+                continue
+
+            spot_price = spot_prices.get(token_key)
+            if spot_price is None:
+                continue
+            nav_value += balance * spot_price
+        nav_values.append(nav_value)
+
+    if not nav_values:
+        return None
+    if basis == "average_nav":
+        return round(sum(nav_values) / len(nav_values), 2)
+    return round(max(nav_values), 2)
 
 
 def _load_recent_cached_coingecko_prices(
@@ -968,6 +1005,72 @@ def _upsert_sync_state(
     db.commit()
 
 
+def _load_network_snapshots(
+    db: Session,
+    client: httpx.Client,
+    address: str,
+    start_date: date,
+    end_date: date,
+) -> tuple[date, dict[date, dict[str, float]], dict[str, str | None]]:
+    effective_end_date, _ = _resolve_effective_end_date(end_date)
+    if effective_end_date < start_date:
+        raise ValueError("start_date cannot be in the future")
+
+    base_snapshot = _load_latest_holding_snapshot_before(db, address, start_date)
+    initial_balances: dict[str, float] | None = None
+    initial_token_contracts: dict[str, str | None] | None = None
+    snapshot_date: date | None = None
+
+    if base_snapshot is not None:
+        snapshot_date, balances, token_contracts = base_snapshot
+        initial_balances = balances
+        initial_token_contracts = token_contracts
+
+    if base_snapshot is not None:
+        next_date = snapshot_date + timedelta(days=1)
+        if next_date <= effective_end_date:
+            start_block, end_block = _resolve_block_range(client, next_date, effective_end_date)
+            should_fetch_events = True
+        else:
+            start_block, end_block = 0, 0
+            should_fetch_events = False
+    else:
+        _, end_block = _resolve_block_range(client, start_date, effective_end_date)
+        start_block = 0
+        should_fetch_events = True
+
+    if should_fetch_events and start_block <= end_block:
+        eth_transactions = _fetch_etherscan_events(
+            client,
+            address,
+            action="txlist",
+            start_block=start_block,
+            end_block=end_block,
+        )
+        token_transfers = _fetch_etherscan_events(
+            client,
+            address,
+            action="tokentx",
+            start_block=start_block,
+            end_block=end_block,
+        )
+    else:
+        eth_transactions = []
+        token_transfers = []
+
+    snapshots, token_contracts = build_daily_balances_from_events(
+        address=address,
+        start_date=start_date,
+        end_date=effective_end_date,
+        eth_transactions=eth_transactions,
+        token_transfers=token_transfers,
+        initial_balances=initial_balances,
+        initial_token_contracts=initial_token_contracts,
+        initial_snapshot_date=snapshot_date if base_snapshot is not None else None,
+    )
+    return effective_end_date, snapshots, token_contracts
+
+
 def _sample_recent_sender_addresses(
     db: Session,
     target_count: int,
@@ -1012,6 +1115,70 @@ def _sample_recent_sender_addresses(
     return sampled_addresses
 
 
+def _estimate_address_market_cap_from_network(
+    db: Session,
+    client: httpx.Client,
+    address: str,
+    start_date: date,
+    end_date: date,
+    basis: str,
+    screening_max_pages: int | None = None,
+) -> float | None:
+    if screening_max_pages is None:
+        effective_end_date, snapshots, token_contracts = _load_network_snapshots(
+            db=db,
+            client=client,
+            address=address,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    else:
+        effective_end_date, _ = _resolve_effective_end_date(end_date)
+        if effective_end_date < start_date:
+            raise ValueError("start_date cannot be in the future")
+
+        start_block, end_block = _resolve_block_range(client, start_date, effective_end_date)
+        eth_transactions = _fetch_etherscan_events(
+            client,
+            address,
+            action="txlist",
+            start_block=start_block,
+            end_block=end_block,
+            max_pages=screening_max_pages,
+        )
+        token_transfers = _fetch_etherscan_events(
+            client,
+            address,
+            action="tokentx",
+            start_block=start_block,
+            end_block=end_block,
+            max_pages=screening_max_pages,
+        )
+        snapshots, token_contracts = build_daily_balances_from_events(
+            address=address,
+            start_date=start_date,
+            end_date=effective_end_date,
+            eth_transactions=eth_transactions,
+            token_transfers=token_transfers,
+        )
+
+    if not snapshots:
+        return None
+
+    token_reference = _build_token_balance_reference(snapshots)
+    if not token_reference:
+        return None
+
+    spot_prices = _fetch_spot_prices(
+        db=db,
+        client=client,
+        token_contracts=token_contracts,
+        token_reference=token_reference,
+        as_of_date=effective_end_date,
+    )
+    return _estimate_market_cap_from_snapshots(snapshots, spot_prices, basis=basis)
+
+
 def generate_random_recent_addresses(
     db: Session,
     count: int,
@@ -1041,26 +1208,51 @@ def generate_random_recent_addresses(
         return candidate_addresses[:target_count]
 
     qualified_addresses: list[str] = []
-    for address in candidate_addresses:
-        try:
-            payload = load_or_sync_address_performance(
+    screening_started_at = time_module.perf_counter()
+    network_screened = 0
+    with httpx.Client(timeout=settings.http_timeout_seconds) as client:
+        for address in candidate_addresses:
+            if (
+                time_module.perf_counter() - screening_started_at
+                > settings.random_address_screen_time_budget_seconds
+            ):
+                break
+
+            saved_snapshot = get_saved_analysis_snapshot_by_key(
                 db,
-                raw_address=address,
+                address=address,
                 start_date=start_date,
                 end_date=end_date,
                 top_n_tokens=top_n_tokens,
-                refresh=False,
             )
-        except ValueError:
-            continue
+            if saved_snapshot is not None:
+                market_cap_usd = resolve_market_cap_from_response(
+                    saved_snapshot.payload or {},
+                    basis=basis,
+                )
+            else:
+                if network_screened >= settings.random_address_network_screen_limit:
+                    continue
+                network_screened += 1
+                try:
+                    market_cap_usd = _estimate_address_market_cap_from_network(
+                        db=db,
+                        client=client,
+                        address=address,
+                        start_date=start_date,
+                        end_date=end_date,
+                        basis=basis,
+                        screening_max_pages=settings.random_address_screen_max_pages,
+                    )
+                except ValueError:
+                    continue
 
-        market_cap_usd = resolve_market_cap_from_response(payload, basis=basis)
-        if market_cap_usd is None or market_cap_usd < min_market_cap_usd:
-            continue
+            if market_cap_usd is None or market_cap_usd < min_market_cap_usd:
+                continue
 
-        qualified_addresses.append(address)
-        if len(qualified_addresses) >= target_count:
-            break
+            qualified_addresses.append(address)
+            if len(qualified_addresses) >= target_count:
+                break
 
     return qualified_addresses
 
@@ -1079,63 +1271,16 @@ def sync_address_from_network_and_recompute(
         raise ValueError("ETHERSCAN_API_KEY is required for network query")
 
     address = normalize_address(raw_address)
-    effective_end_date, _ = _resolve_effective_end_date(end_date)
-    if effective_end_date < start_date:
-        raise ValueError("start_date cannot be in the future")
     started_at = time_module.perf_counter()
 
     try:
         with httpx.Client(timeout=settings.http_timeout_seconds) as client:
-            base_snapshot = _load_latest_holding_snapshot_before(db, address, start_date)
-            initial_balances: dict[str, float] | None = None
-            initial_token_contracts: dict[str, str | None] | None = None
-
-            if base_snapshot is not None:
-                snapshot_date, balances, token_contracts = base_snapshot
-                initial_balances = balances
-                initial_token_contracts = token_contracts
-
-            if base_snapshot is not None:
-                next_date = snapshot_date + timedelta(days=1)
-                if next_date <= effective_end_date:
-                    start_block, end_block = _resolve_block_range(client, next_date, effective_end_date)
-                    should_fetch_events = True
-                else:
-                    start_block, end_block = 0, 0
-                    should_fetch_events = False
-            else:
-                _, end_block = _resolve_block_range(client, start_date, effective_end_date)
-                start_block = 0
-                should_fetch_events = True
-
-            if should_fetch_events and start_block <= end_block:
-                eth_transactions = _fetch_etherscan_events(
-                    client,
-                    address,
-                    action="txlist",
-                    start_block=start_block,
-                    end_block=end_block,
-                )
-                token_transfers = _fetch_etherscan_events(
-                    client,
-                    address,
-                    action="tokentx",
-                    start_block=start_block,
-                    end_block=end_block,
-                )
-            else:
-                eth_transactions = []
-                token_transfers = []
-
-            snapshots, token_contracts = build_daily_balances_from_events(
+            effective_end_date, snapshots, token_contracts = _load_network_snapshots(
+                db=db,
+                client=client,
                 address=address,
                 start_date=start_date,
-                end_date=effective_end_date,
-                eth_transactions=eth_transactions,
-                token_transfers=token_transfers,
-                initial_balances=initial_balances,
-                initial_token_contracts=initial_token_contracts,
-                initial_snapshot_date=snapshot_date if base_snapshot is not None else None,
+                end_date=end_date,
             )
 
             if not snapshots:

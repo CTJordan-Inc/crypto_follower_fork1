@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.models import Base, SavedAnalysisSnapshot
 from app.services.analysis_store import (
     get_saved_addresses,
+    hydrate_saved_performance_payload,
     list_saved_analysis_summaries,
     list_saved_analysis_snapshots,
     save_analysis_snapshot,
@@ -129,3 +130,14 @@ def test_list_saved_analysis_summaries_can_sort_by_market_cap() -> None:
         )
 
         assert [item["address"] for item in items] == ["0xaaa", "0xbbb"]
+
+
+def test_hydrate_saved_performance_payload_backfills_legacy_market_cap_meta() -> None:
+    payload = _build_payload("0xABC", total_return=0.2)
+
+    hydrated = hydrate_saved_performance_payload(payload)
+
+    assert hydrated["meta"]["address_market_cap_basis"] == "max_nav"
+    assert hydrated["meta"]["address_market_cap_usd"] == 120_000
+    assert hydrated["meta"]["address_peak_nav_usd"] == 120_000
+    assert hydrated["meta"]["address_average_nav_usd"] == 110_000

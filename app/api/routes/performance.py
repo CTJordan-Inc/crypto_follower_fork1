@@ -15,6 +15,7 @@ from app.schemas import (
 )
 from app.services.analysis_store import (
     get_saved_analysis_snapshot,
+    hydrate_saved_performance_payload,
     list_saved_analysis_summaries,
 )
 from app.services.network_sync import (
@@ -132,7 +133,7 @@ def get_saved_analysis(
     snapshot = get_saved_analysis_snapshot(db, snapshot_id)
     if snapshot is None or snapshot.payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="saved analysis not found")
-    return snapshot.payload
+    return hydrate_saved_performance_payload(snapshot.payload)
 
 
 @router.post("/{address}/network/recompute", response_model=PerformanceResponse)

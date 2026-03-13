@@ -119,7 +119,7 @@
             <textarea id="batch-addresses" name="batch_addresses" rows="8" placeholder="0x...\n0x...\n0x..."></textarea>
           </label>
           <div class="batch-actions">
-            <p class="batch-hint">批量分析會使用這個區塊自己的日期與 Top N 設定；隨機取樣若設最低地址市值，會先預分析再篩選。</p>
+            <p class="batch-hint">批量分析會使用這個區塊自己的日期與 Top N 設定；隨機取樣若設最低地址市值，會做快速預篩，只看區間內活動與現貨價，目的是避免請求逾時。</p>
             <div class="batch-buttons">
               <button id="random-batch-btn" type="button" class="secondary-button">隨機產生 50 地址</button>
               <button id="batch-submit-btn" type="submit">批量分析</button>

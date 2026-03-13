@@ -278,6 +278,58 @@
   - `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
 
 ## 日期
+- 2026-03-13
+
+## 本次 random-address timeout 修正
+- 背景：
+  - 使用者回報「隨機產生 50 地址」仍會出現 `失敗：請求逾時，請稍後再試`
+
+## 本次調整
+- `app/services/network_sync.py`
+  - `generate_random_recent_addresses()` 對陌生地址的 network screening 增加硬上限
+  - 快速預篩改成只抓區間內有限頁數事件，避免單次 random-address 請求變成多地址完整歷史同步
+  - `_fetch_etherscan_events()` 新增 `max_pages` 參數供快速預篩使用
+- `app/core/config.py`
+  - 新增：
+    - `random_address_network_screen_limit`
+    - `random_address_screen_max_pages`
+- `.env.example`
+  - 補上對應設定
+- `app/static/dashboard.js`
+  - 隨機地址狀態文案改成「快速預篩（避免逾時）」
+- `app/templates/index.html`
+  - 批量分析提示文案補充：最低地址市值在這裡是快速預篩，不是完整精算
+
+## 本次驗證
+- `.venv/bin/pytest -q`
+  - `23 passed`
+- `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
+- `node --check app/static/dashboard.js`
+
+## 2026-03-13 隨機地址快速預篩優化
+
+### 背景
+- 使用者回報「隨機產生 50 地址」仍會出現前端 timeout
+- 問題集中在：設定最低地址市值時，系統會對陌生地址做高成本鏈上預估
+
+### 本次調整
+- `app/services/network_sync.py`
+  - `generate_random_recent_addresses()` 對陌生地址的 network screening 加上數量上限
+  - 快速預篩改成只抓有限頁數事件，避免單次 random-address 請求變成多地址完整歷史同步
+- `app/core/config.py`
+  - 新增：
+    - `random_address_network_screen_limit`
+    - `random_address_screen_max_pages`
+- `app/static/dashboard.js`
+  - 隨機地址狀態文案改成「快速預篩（避免逾時）」
+- `app/templates/index.html`
+  - 批量分析提示文案補充：最低地址市值是快速預篩，不是完整精算
+
+### 驗證
+- `tests/test_network_sync.py`
+  - 新增 `test_generate_random_recent_addresses_limits_unsaved_network_screening`
+
+## 日期
 - 2026-03-12
 
 ## 本次小幅 UI 調整
@@ -486,6 +538,56 @@
 ## 本次驗證
 - `.venv/bin/pytest -q`
   - `20 passed`
+- `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
+  - 通過
+- `node --check app/static/dashboard.js`
+  - 通過
+
+## 日期
+- 2026-03-13
+
+## 本次隨機地址 timeout 優化
+- 問題：
+  - 隨機地址若設最低地址市值，原本會對候選地址逐一跑完整 `load_or_sync_address_performance()`
+  - 這會同步鏈上、抓歷史價格、重算 NAV，成本太高
+  - 即使前端 timeout 拉長，也仍可能逾時
+
+## 本次修正
+1. 隨機地址改為快速市值預篩
+   - `app/services/network_sync.py`
+   - 新增：
+     - `_estimate_market_cap_from_snapshots()`
+     - `_estimate_address_market_cap_from_network()`
+     - `_load_network_snapshots()`
+   - 行為：
+     - 對未保存分析的候選地址，不先跑完整績效
+     - 只抓鏈上持倉快照 + 現貨價，快速估地址市值
+     - 以此篩掉低於門檻的地址
+
+2. 已保存分析優先重用
+   - `app/services/analysis_store.py`
+   - 新增 `get_saved_analysis_snapshot_by_key()`
+   - 若該地址同區間同 `top_n_tokens` 已有保存結果，就直接用保存分析的地址市值，不再重抓
+
+3. 隨機篩選時間預算
+   - `app/core/config.py`
+   - 新增 `random_address_screen_time_budget_seconds`
+   - 目的：
+     - 避免隨機地址取樣為了補滿 50 個，一直做預篩到前端逾時
+
+4. 候選放大倍數調低
+   - `random_address_candidate_multiplier` 從 `4` 下修到 `2`
+   - 降低一次要預篩的地址數量
+
+## 口徑說明
+- 隨機地址的「最低地址市值」現在是快速預篩：
+  - 對未保存地址，用區間內持倉 + 現貨價估值
+- 正式分析後顯示在畫面與保存分析中的「地址市值」：
+  - 仍以該次分析計算出的 NAV 指標為準
+
+## 本次驗證
+- `.venv/bin/pytest -q`
+  - `21 passed`
 - `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
   - 通過
 - `node --check app/static/dashboard.js`
