@@ -151,6 +151,7 @@ class BatchRecomputeRequest(BaseModel):
     start_date: date
     end_date: date
     top_n_tokens: int = Field(default=10, ge=1, le=100)
+    market_cap_basis: str = "max_nav"
     refresh: bool = False
 
     @field_validator("addresses")
@@ -174,6 +175,8 @@ class BatchRecomputeRequest(BaseModel):
     def validate_dates(self) -> "BatchRecomputeRequest":
         if self.end_date < self.start_date:
             raise ValueError("end_date must be greater than or equal to start_date")
+        if self.market_cap_basis not in {"max_nav", "average_nav"}:
+            raise ValueError("market_cap_basis must be one of: max_nav, average_nav")
         return self
 
 
@@ -270,3 +273,4 @@ class RandomAddressesResponse(BaseModel):
     source: str
     min_market_cap_usd: float
     market_cap_basis: str
+    filter_stage: str

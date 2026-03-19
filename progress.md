@@ -280,6 +280,90 @@
 ## 日期
 - 2026-03-13
 
+## 本次抽樣 / 批量結果過濾改版
+- 目標：
+  - 不再在「隨機產生 50 地址」階段做地址市值預篩
+  - 改成先快速抽樣，再於批量結果表依地址市值門檻過濾顯示
+
+## 本次修正內容
+
+1. 隨機抽樣改為快路徑
+   - `app/api/routes/performance.py`
+     - `GET /performance/random-addresses` 改成不再用 `min_market_cap_usd` 先過濾地址
+     - response 新增 `filter_stage=batch-results`
+   - 目的：
+     - 避免 random-address 請求再次因地址市值預篩而變慢
+
+2. 批量分析接上地址市值口徑
+   - `app/schemas.py`
+     - `BatchRecomputeRequest` 新增 `market_cap_basis`
+   - `app/services/network_sync.py`
+     - `batch_load_or_sync_address_performance()` 依 request 的 `market_cap_basis` 計算批量結果表中的地址市值
+
+3. 前端結果表改為後過濾
+   - `app/static/dashboard.js`
+     - 隨機抽樣請求不再送 `min_market_cap_usd`
+     - 批量結果表會依目前最低地址市值門檻動態隱藏低於門檻的成功結果
+     - 失敗結果不會被門檻隱藏
+     - 調整最低地址市值輸入框後，可直接重繪結果表，不需重跑批量分析
+   - `app/templates/index.html`
+     - 欄位文案改成「批量結果最低地址市值（USD）」
+     - hint 明確說明：隨機取樣不先過濾，門檻在批量結果表套用
+
+4. 文件與測試
+   - `README.md`
+     - 文件同步更新為新流程
+   - 新增測試：
+     - `tests/test_performance_routes.py`
+       - 驗證 random-address 會把門檻延後到 batch results
+     - `tests/test_network_sync.py`
+       - 驗證 batch analysis 會依 `market_cap_basis` 輸出地址市值
+
+## 本次驗證
+- `.venv/bin/pytest -q`
+  - `27 passed`
+- `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
+- `node --check app/static/dashboard.js`
+
+## 日期
+- 2026-03-17
+
+## 本次批量分析 UX 修正
+- 背景：
+  - 使用者回報先抽 50 地址後按下分析，8 小時都沒有任何結果
+
+## 本次修正內容
+
+1. 批量分析改為逐地址回填
+   - `app/static/dashboard.js`
+     - Dashboard 不再一次等待整批 `POST /performance/batch/network/recompute`
+     - 改成逐地址呼叫 `POST /performance/{address}/network/recompute`
+     - 每完成一個地址就立即更新表格與進度文字
+   - 目的：
+     - 避免使用者長時間看不到任何結果
+     - 讓單一慢地址不再把整批 UI 卡死
+
+2. 單地址 batch 模式 timeout
+   - `app/static/dashboard.js`
+     - 新增 `BATCH_ADDRESS_TIMEOUT_MS`
+   - 目的：
+     - 避免某個地址異常慢時，整個批量流程無限等待
+
+3. UI / 文件同步
+   - `app/templates/index.html`
+     - hint 補充：批量分析會逐地址執行並逐步寫入表格
+   - `README.md`
+     - 文件補充 dashboard batch UI 現在是 progressive flow
+
+## 本次驗證
+- `.venv/bin/pytest -q`
+  - `27 passed`
+- `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
+- `node --check app/static/dashboard.js`
+
+## 日期
+- 2026-03-13
+
 ## 本次 random-address timeout 修正
 - 背景：
   - 使用者回報「隨機產生 50 地址」仍會出現 `失敗：請求逾時，請稍後再試`
@@ -305,6 +389,33 @@
   - `23 passed`
 - `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile $(find app tests -name '*.py' -type f)`
 - `node --check app/static/dashboard.js`
+
+## 2026-03-13 live timeout 收斂
+
+### 實測結論
+- 直接用 live network 呼叫 random-address 流程後，確認 timeout 真正卡在 CoinGecko spot price 預篩，不是前端假 timeout
+- Etherscan 取樣本身不是主要瓶頸；慢點在 random screening 的 `simple/token_price`
+
+### 本次補強
+- `app/services/network_sync.py`
+  - random screening 模式下只抓少量 spot token
+  - random screening 模式下遇到 CoinGecko `400` 不再遞迴拆批
+  - random screening 模式下遇到 CoinGecko `429/5xx` 直接 fast-fail，不做長時間 backoff
+- `app/core/config.py`
+  - 新增 `random_address_screen_spot_token_limit`
+- `.env.example`
+  - 補上 `RANDOM_ADDRESS_SCREEN_SPOT_TOKEN_LIMIT=6`
+
+### 驗證
+- live network 實測：
+  - `count=50`
+  - `min_market_cap_usd=10000`
+  - `exclude_saved=true`
+  - 約 `29.06s` 返回
+  - 返回 `1` 個地址
+- 測試：
+  - `.venv/bin/pytest -q`
+  - `25 passed`
 
 ## 2026-03-13 隨機地址快速預篩優化
 

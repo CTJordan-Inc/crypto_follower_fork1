@@ -99,7 +99,7 @@
               <input id="batch_top_n_tokens" name="batch_top_n_tokens" type="number" min="1" max="100" value="{{ default_top_n_tokens }}" required />
             </label>
             <label>
-              隨機篩選最低地址市值（USD）
+              批量結果最低地址市值（USD）
               <input id="batch_min_market_cap_usd" name="batch_min_market_cap_usd" type="number" min="0" step="1000" value="10000" />
             </label>
             <label>
@@ -119,7 +119,7 @@
             <textarea id="batch-addresses" name="batch_addresses" rows="8" placeholder="0x...\n0x...\n0x..."></textarea>
           </label>
           <div class="batch-actions">
-            <p class="batch-hint">批量分析會使用這個區塊自己的日期與 Top N 設定；隨機取樣若設最低地址市值，會做快速預篩，只看區間內活動與現貨價，目的是避免請求逾時。</p>
+            <p class="batch-hint">隨機取樣只負責快速抽 50 個地址，不先做市值預篩；最低地址市值門檻會在批量分析完成後套用到下方結果表。批量分析會逐地址執行並逐步把結果寫入表格，避免長時間無回應。</p>
             <div class="batch-buttons">
               <button id="random-batch-btn" type="button" class="secondary-button">隨機產生 50 地址</button>
               <button id="batch-submit-btn" type="submit">批量分析</button>
@@ -189,6 +189,6 @@
       </section>
     </main>
 
-    <script src="/static/dashboard.js?v=20260313-1"></script>
+    <script src="/static/dashboard.js?v=20260317-1"></script>
   </body>
 </html>

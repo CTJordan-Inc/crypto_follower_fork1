@@ -60,6 +60,7 @@ def recompute_batch_from_network(
             start_date=payload.start_date,
             end_date=payload.end_date,
             top_n_tokens=payload.top_n_tokens,
+            market_cap_basis=payload.market_cap_basis,
             refresh=payload.refresh,
         )
     except ValueError as error:
@@ -92,7 +93,7 @@ def get_random_addresses(
             start_date=resolved_start_date,
             end_date=resolved_end_date,
             top_n_tokens=top_n_tokens,
-            min_market_cap_usd=min_market_cap_usd,
+            min_market_cap_usd=0,
             market_cap_basis=market_cap_basis,
             exclude_saved=exclude_saved,
         )
@@ -104,6 +105,7 @@ def get_random_addresses(
         "source": "etherscan-recent-block-senders",
         "min_market_cap_usd": min_market_cap_usd,
         "market_cap_basis": market_cap_basis,
+        "filter_stage": "batch-results",
     }
 
 

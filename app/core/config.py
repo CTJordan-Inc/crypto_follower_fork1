@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     random_address_screen_time_budget_seconds: int = 90
     random_address_network_screen_limit: int = 8
     random_address_screen_max_pages: int = 1
+    random_address_screen_spot_token_limit: int = 6
 
     model_config = SettingsConfigDict(
         env_file=".env",

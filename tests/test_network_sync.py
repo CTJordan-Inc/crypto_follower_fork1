@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 
+import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -289,6 +290,91 @@ def test_generate_random_recent_addresses_limits_unsaved_network_screening(monke
         settings.random_address_network_screen_limit = original_limit
         settings.random_address_screen_time_budget_seconds = original_budget
         settings.random_address_screen_max_pages = original_pages
+
+
+def test_fetch_spot_prices_chunk_skips_recursive_split_in_fast_mode(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_coingecko_get_json(client, url, params, max_retries_override=None):
+        calls.append(params["contract_addresses"].split(","))
+        request = httpx.Request("GET", url, params=params)
+        response = httpx.Response(status_code=400, request=request)
+        raise httpx.HTTPStatusError("bad request", request=request, response=response)
+
+    monkeypatch.setattr(network_sync, "_coingecko_get_json", fake_coingecko_get_json)
+
+    prices = network_sync._fetch_spot_prices_chunk(
+        client=httpx.Client(),
+        contracts=["0xaaa", "0xbbb"],
+        contract_to_tokens={"0xaaa": ["AAA"], "0xbbb": ["BBB"]},
+        allow_bad_request_split=False,
+    )
+
+    assert prices == {}
+    assert calls == [["0xaaa", "0xbbb"]]
+
+
+def test_fetch_spot_prices_chunk_fast_mode_returns_empty_on_rate_limit(monkeypatch) -> None:
+    def fake_coingecko_get_json(client, url, params, max_retries_override=None):
+        request = httpx.Request("GET", url, params=params)
+        response = httpx.Response(status_code=429, request=request)
+        raise httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+    monkeypatch.setattr(network_sync, "_coingecko_get_json", fake_coingecko_get_json)
+
+    prices = network_sync._fetch_spot_prices_chunk(
+        client=httpx.Client(),
+        contracts=["0xaaa"],
+        contract_to_tokens={"0xaaa": ["AAA"]},
+        allow_bad_request_split=False,
+        coingecko_max_retries=0,
+    )
+
+    assert prices == {}
+
+
+def test_batch_load_or_sync_address_performance_uses_requested_market_cap_basis(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+
+    payload = {
+        "address": "0xabc",
+        "nav_curve": [
+            {"date": date(2025, 1, 1), "nav_usd": 100_000},
+            {"date": date(2025, 1, 31), "nav_usd": 120_000},
+        ],
+        "metrics": {"total_return": 0.2, "cagr": 0.24, "sharpe": 1.1},
+        "behavior": {"style": "holding", "return_driver": "market_appreciation", "summary": "ok"},
+        "meta": {
+            "used_cache": True,
+            "runtime_seconds": 1.0,
+            "address_market_cap_usd": 120_000,
+            "address_market_cap_basis": "max_nav",
+            "address_peak_nav_usd": 120_000,
+            "address_average_nav_usd": 110_000,
+        },
+    }
+
+    monkeypatch.setattr(
+        network_sync,
+        "load_or_sync_address_performance",
+        lambda *args, **kwargs: payload,
+    )
+
+    with Session(engine) as session:
+        result = network_sync.batch_load_or_sync_address_performance(
+            db=session,
+            addresses=["0xabc"],
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 1, 31),
+            top_n_tokens=10,
+            market_cap_basis="average_nav",
+            refresh=False,
+        )
+
+    item = result["results"][0]
+    assert item["market_cap_usd"] == 110_000
+    assert item["market_cap_basis"] == "average_nav"
 
 
 def test_build_daily_balances_can_start_from_initial_snapshot() -> None:

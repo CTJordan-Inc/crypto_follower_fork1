@@ -87,9 +87,12 @@ def _coingecko_get_json(
     client: httpx.Client,
     url: str,
     params: dict[str, Any],
+    max_retries_override: int | None = None,
 ) -> dict[str, Any]:
     headers = _coingecko_headers()
     max_retries = max(0, settings.coingecko_max_retries)
+    if max_retries_override is not None:
+        max_retries = max(0, max_retries_override)
 
     for attempt in range(max_retries + 1):
         if settings.coingecko_request_interval_seconds > 0:
@@ -692,6 +695,9 @@ def _fetch_spot_prices(
     token_contracts: dict[str, str | None],
     token_reference: dict[str, float],
     as_of_date: date,
+    contract_limit: int | None = None,
+    allow_bad_request_split: bool = True,
+    coingecko_max_retries: int | None = None,
 ) -> dict[str, float]:
     spot_prices = _load_recent_cached_coingecko_prices(
         db=db,
@@ -704,6 +710,7 @@ def _fetch_spot_prices(
             client,
             f"{settings.coingecko_base_url}/simple/price",
             {"ids": "ethereum", "vs_currencies": "usd"},
+            max_retries_override=coingecko_max_retries,
         )
         eth_price = payload.get("ethereum", {}).get("usd") if payload else None
         if eth_price is not None:
@@ -714,7 +721,10 @@ def _fetch_spot_prices(
         token_key for token_key in token_reference if token_key != "ETH" and token_key not in spot_prices
     ]
     candidate_tokens.sort(key=lambda token_key: token_reference.get(token_key, 0.0), reverse=True)
-    candidate_tokens = candidate_tokens[: max(1, settings.coingecko_spot_contract_limit)]
+    resolved_contract_limit = (
+        max(1, contract_limit) if contract_limit is not None else max(1, settings.coingecko_spot_contract_limit)
+    )
+    candidate_tokens = candidate_tokens[:resolved_contract_limit]
 
     for token_key in candidate_tokens:
         contract = token_contracts.get(token_key)
@@ -736,6 +746,8 @@ def _fetch_spot_prices(
             client=client,
             contracts=chunk,
             contract_to_tokens=contract_to_tokens,
+            allow_bad_request_split=allow_bad_request_split,
+            coingecko_max_retries=coingecko_max_retries,
         )
         spot_prices.update(chunk_prices)
 
@@ -746,6 +758,8 @@ def _fetch_spot_prices_chunk(
     client: httpx.Client,
     contracts: list[str],
     contract_to_tokens: dict[str, list[str]],
+    allow_bad_request_split: bool = True,
+    coingecko_max_retries: int | None = None,
 ) -> dict[str, float]:
     if not contracts:
         return {}
@@ -758,17 +772,35 @@ def _fetch_spot_prices_chunk(
                 "contract_addresses": ",".join(contracts),
                 "vs_currencies": "usd",
             },
+            max_retries_override=coingecko_max_retries,
         )
     except httpx.HTTPStatusError as error:
         if error.response.status_code == COINGECKO_BAD_REQUEST_STATUS:
-            if len(contracts) == 1:
+            if not allow_bad_request_split or len(contracts) == 1:
                 return {}
 
             middle = len(contracts) // 2
-            left_prices = _fetch_spot_prices_chunk(client, contracts[:middle], contract_to_tokens)
-            right_prices = _fetch_spot_prices_chunk(client, contracts[middle:], contract_to_tokens)
+            left_prices = _fetch_spot_prices_chunk(
+                client,
+                contracts[:middle],
+                contract_to_tokens,
+                allow_bad_request_split=allow_bad_request_split,
+                coingecko_max_retries=coingecko_max_retries,
+            )
+            right_prices = _fetch_spot_prices_chunk(
+                client,
+                contracts[middle:],
+                contract_to_tokens,
+                allow_bad_request_split=allow_bad_request_split,
+                coingecko_max_retries=coingecko_max_retries,
+            )
             left_prices.update(right_prices)
             return left_prices
+        if not allow_bad_request_split and (
+            error.response.status_code == COINGECKO_RATE_LIMIT_STATUS
+            or error.response.status_code >= 500
+        ):
+            return {}
         raise
 
     if not payload:
@@ -1175,6 +1207,13 @@ def _estimate_address_market_cap_from_network(
         token_contracts=token_contracts,
         token_reference=token_reference,
         as_of_date=effective_end_date,
+        contract_limit=(
+            settings.random_address_screen_spot_token_limit
+            if screening_max_pages is not None
+            else None
+        ),
+        allow_bad_request_split=screening_max_pages is None,
+        coingecko_max_retries=0 if screening_max_pages is not None else None,
     )
     return _estimate_market_cap_from_snapshots(snapshots, spot_prices, basis=basis)
 
@@ -1462,10 +1501,14 @@ def batch_load_or_sync_address_performance(
     start_date: date,
     end_date: date,
     top_n_tokens: int,
+    market_cap_basis: str = "max_nav",
     refresh: bool = False,
 ) -> dict[str, Any]:
     if len(addresses) > settings.batch_address_limit:
         raise ValueError(f"addresses cannot exceed {settings.batch_address_limit} items")
+    resolved_market_cap_basis = (
+        market_cap_basis if market_cap_basis in {"max_nav", "average_nav"} else "max_nav"
+    )
 
     results: list[dict[str, Any]] = []
     completed = 0
@@ -1487,8 +1530,11 @@ def batch_load_or_sync_address_performance(
                 {
                     "address": address,
                     "success": True,
-                    "market_cap_usd": payload["meta"].get("address_market_cap_usd"),
-                    "market_cap_basis": payload["meta"].get("address_market_cap_basis"),
+                    "market_cap_usd": resolve_market_cap_from_response(
+                        payload,
+                        basis=resolved_market_cap_basis,
+                    ),
+                    "market_cap_basis": resolved_market_cap_basis,
                     "nav_end_usd": nav_end_usd,
                     "total_return": payload["metrics"]["total_return"],
                     "cagr": payload["metrics"]["cagr"],

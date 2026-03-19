@@ -92,8 +92,12 @@
 - Dashboard 的「隨機產生 50 地址」會呼叫 `GET /api/v1/performance/random-addresses?count=50&exclude_saved=true`
 - 來源是 Etherscan proxy 的近期區塊交易發送者（`from` address）
 - 預設排除已保存過分析結果的地址，避免一直重複分析同一批
-- 可設定最低地址市值門檻；系統會先用同一區間跑一次地址分析，再以地址市值過濾
-- 為避免隨機取樣逾時，對「尚未保存分析」的地址，系統會先做快速市值預篩（用區間內持倉搭配現貨價估值），不是先完整跑完績效
+- 「最低地址市值」不再用於隨機抽樣階段，避免 random-address 請求因鏈上預篩而逾時
+- 新流程是：
+  1. 先快速抽 50 個地址
+  2. 再跑批量分析
+  3. 批量結果表依地址市值門檻隱藏低於門檻的成功結果
+- 失敗結果不會因門檻被隱藏，避免使用者誤以為該地址根本沒跑
 - 保存分析與正式績效頁顯示的地址市值，仍以該次完整分析的 NAV 結果為準
 - 地址市值口徑可選：
   - `max_nav`：區間內最大 NAV（預設，較保守）
@@ -144,12 +148,15 @@
 - `POST /api/v1/performance/batch/network/recompute`
   - 一次最多 50 個地址
   - 預設逐個使用快取；只有缺資料或勾選 `refresh=true` 時才會重抓
+  - request body 可指定 `market_cap_basis`，控制批量結果表中的地址市值口徑
   - 適合先把候選清單跑過一輪，再回到單地址細看
+- Dashboard UI 目前不再一次等待 50 個地址全部完成才顯示結果，而是逐地址呼叫單地址分析 API，逐步把成功/失敗結果寫入表格並更新進度
 - `GET /api/v1/performance/random-addresses`
   - 從近期 Ethereum 區塊隨機抽樣地址
   - query params:
     - `count`：1~50
     - `exclude_saved`：是否排除已保存分析的地址，預設 `true`
+  - `min_market_cap_usd` 只會原樣回傳給前端，實際門檻改在批量結果表套用，不在這個 endpoint 先過濾
 
 範例：
 
@@ -161,6 +168,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/performance/batch/network/recompute \
     "start_date": "2025-01-01",
     "end_date": "2025-03-31",
     "top_n_tokens": 10,
+    "market_cap_basis": "max_nav",
     "refresh": false
   }'
 ```
