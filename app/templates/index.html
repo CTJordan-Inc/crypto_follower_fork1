@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>crypto_follower Dashboard</title>
+    <link rel="stylesheet" href="/static/dashboard.css?v=20260313-1" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <main class="container">
+      <section class="panel">
+        <h1>crypto_follower MVP Dashboard</h1>
+        <p class="subtitle">輸入 Ethereum 地址後，直接查詢網路資料、拆解資金流與績效來源。</p>
+        <div class="explain-grid">
+          <article class="explain-card">
+            <h3>總報酬</h3>
+            <p>計算方式是 <code>(期末 NAV / 期初 NAV) - 1</code>，代表這段區間整體淨值變化。</p>
+          </article>
+          <article class="explain-card">
+            <h3>地址行為</h3>
+            <p>根據持倉變動、淨轉入/轉出與周轉率，判斷較像長期持有、累積、減倉、中轉或混合。</p>
+          </article>
+          <article class="explain-card">
+            <h3>回報來源</h3>
+            <p>判斷 NAV 變動主要來自市場漲跌，還是來自資金淨轉入/轉出，避免把搬倉誤判成投資績效。</p>
+          </article>
+          <article class="explain-card">
+            <h3>地址市值</h3>
+            <p>預設用區間內最大 NAV 表示；隨機地址篩選也可切換成區間內平均 NAV。</p>
+          </article>
+        </div>
+
+        <form id="query-form" class="form-grid">
+          <label>
+            地址
+            <input id="address" name="address" placeholder="0x..." required />
+          </label>
+          <label>
+            開始日期
+            <input id="start_date" name="start_date" type="date" value="{{ default_start_date }}" required />
+          </label>
+          <label>
+            結束日期
+            <input id="end_date" name="end_date" type="date" value="{{ default_end_date }}" required />
+          </label>
+          <label>
+            Top N 代幣
+            <input id="top_n_tokens" name="top_n_tokens" type="number" min="1" max="100" value="{{ default_top_n_tokens }}" required />
+          </label>
+          <label class="checkbox-row">
+            <input id="refresh" name="refresh" type="checkbox" />
+            強制重抓鏈上與價格資料
+          </label>
+          <button id="submit-btn" type="submit">查詢並計算績效</button>
+        </form>
+
+        <div id="status" class="status"></div>
+      </section>
+
+      <section class="panel">
+        <h2>NAV 曲線</h2>
+        <canvas id="nav-chart"></canvas>
+      </section>
+
+      <section class="panel metrics-grid" id="metrics"></section>
+
+      <section class="panel">
+        <h2>地址行為判讀</h2>
+        <div id="behavior" class="kv"></div>
+      </section>
+
+      <section class="panel">
+        <h2>詮釋說明</h2>
+        <div id="interpretations" class="notes"></div>
+      </section>
+
+      <section class="panel">
+        <h2>資料品質、來源與選幣</h2>
+        <div id="meta" class="kv"></div>
+        <div id="quality"></div>
+        <div id="tokens"></div>
+      </section>
+
+      <section class="panel">
+        <h2>批量分析（最多 {{ default_batch_limit }} 個地址）</h2>
+        <form id="batch-form" class="batch-form">
+          <div class="batch-config-grid">
+            <label>
+              批量開始日期
+              <input id="batch_start_date" name="batch_start_date" type="date" value="{{ default_start_date }}" required />
+            </label>
+            <label>
+              批量結束日期
+              <input id="batch_end_date" name="batch_end_date" type="date" value="{{ default_end_date }}" required />
+            </label>
+            <label>
+              批量 Top N 代幣
+              <input id="batch_top_n_tokens" name="batch_top_n_tokens" type="number" min="1" max="100" value="{{ default_top_n_tokens }}" required />
+            </label>
+            <label>
+              批量結果最低地址市值（USD）
+              <input id="batch_min_market_cap_usd" name="batch_min_market_cap_usd" type="number" min="0" step="1000" value="10000" />
+            </label>
+            <label>
+              地址市值口徑
+              <select id="batch_market_cap_basis" name="batch_market_cap_basis">
+                <option value="max_nav" selected>區間內最大 NAV</option>
+                <option value="average_nav">區間內平均 NAV</option>
+              </select>
+            </label>
+            <label class="checkbox-row compact-checkbox">
+              <input id="batch_exclude_saved" name="batch_exclude_saved" type="checkbox" checked />
+              隨機取樣排除已保存地址
+            </label>
+          </div>
+          <label>
+            地址清單（每行一個）
+            <textarea id="batch-addresses" name="batch_addresses" rows="8" placeholder="0x...\n0x...\n0x..."></textarea>
+          </label>
+          <div class="batch-actions">
+            <p class="batch-hint">隨機取樣只負責快速抽 50 個地址，不先做市值預篩；最低地址市值門檻會在批量分析完成後套用到下方結果表。批量分析會逐地址執行並逐步把結果寫入表格，避免長時間無回應。</p>
+            <div class="batch-buttons">
+              <button id="random-batch-btn" type="button" class="secondary-button">隨機產生 50 地址</button>
+              <button id="batch-submit-btn" type="submit">批量分析</button>
+            </div>
+          </div>
+        </form>
+        <div id="batch-status" class="status"></div>
+        <div class="table-wrap">
+          <table id="batch-table" class="batch-table">
+            <thead>
+              <tr>
+                <th>地址</th>
+                <th>地址市值</th>
+                <th>期末 NAV</th>
+                <th>總報酬</th>
+                <th>CAGR</th>
+                <th>行為</th>
+                <th>回報來源</th>
+                <th>快取</th>
+                <th>耗時</th>
+                <th>說明</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>已保存分析</h2>
+        <p class="batch-hint">每次單地址或批量分析都會自動保存當下區間與結果，可隨時回看。「查看詳情」會把這筆保存分析顯示到上方圖表與指標區。</p>
+        <div class="saved-controls">
+          <label>
+            排序欄位
+            <select id="saved_sort_by" name="saved_sort_by">
+              <option value="saved_at" selected>保存時間</option>
+              <option value="total_return">總報酬</option>
+              <option value="market_cap_usd">地址市值</option>
+            </select>
+          </label>
+          <label>
+            排序方向
+            <select id="saved_sort_order" name="saved_sort_order">
+              <option value="desc" selected>由大到小 / 由新到舊</option>
+              <option value="asc">由小到大 / 由舊到新</option>
+            </select>
+          </label>
+        </div>
+        <div id="saved-status" class="status"></div>
+        <div class="table-wrap">
+          <table id="saved-table" class="batch-table">
+            <thead>
+              <tr>
+                <th>地址</th>
+                <th>區間</th>
+                <th>地址市值</th>
+                <th>總報酬</th>
+                <th>行為</th>
+                <th>回報來源</th>
+                <th>保存時間</th>
+                <th>動作</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/dashboard.js?v=20260317-1"></script>
+  </body>
+</html>
