@@ -32,6 +32,7 @@ let latestBatchCompleted = 0;
 let latestBatchFailed = 0;
 let latestBatchFilterBasis = "max_nav";
 const BATCH_ADDRESS_TIMEOUT_MS = 180000;
+const BATCH_CONCURRENCY = 4;
 
 async function extractErrorMessage(response, fallbackMessage) {
   try {
@@ -562,37 +563,59 @@ async function handleBatchSubmit(event) {
   latestBatchFilterBasis = marketCapBasis;
   renderBatchResults(latestBatchResults, minMarketCapUsd);
 
+  const totalAddresses = addresses.length;
+
   try {
-    for (let index = 0; index < addresses.length; index += 1) {
-      const address = addresses[index];
-      try {
-        const payload = await fetchJson(
-          `/api/v1/performance/${encodeURIComponent(address)}/network/recompute`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              start_date: startDate,
-              end_date: endDate,
-              top_n_tokens: topNTokens,
-              refresh,
-            }),
-            timeoutMs: BATCH_ADDRESS_TIMEOUT_MS,
-          }
-        );
-        latestBatchResults.push(buildBatchResultFromPayload(payload, marketCapBasis));
-        latestBatchCompleted += 1;
-      } catch (error) {
-        latestBatchResults.push(buildBatchErrorResult(address, error));
-        latestBatchFailed += 1;
+    await new Promise((resolve) => {
+      let nextIndex = 0;
+      let activeRequests = 0;
+
+      function startNext() {
+        while (activeRequests < BATCH_CONCURRENCY && nextIndex < totalAddresses) {
+          const address = addresses[nextIndex++];
+          activeRequests += 1;
+
+          (async () => {
+            try {
+              const payload = await fetchJson(
+                `/api/v1/performance/${encodeURIComponent(address)}/network/recompute`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    start_date: startDate,
+                    end_date: endDate,
+                    top_n_tokens: topNTokens,
+                    refresh,
+                  }),
+                  timeoutMs: BATCH_ADDRESS_TIMEOUT_MS,
+                }
+              );
+              latestBatchResults.push(buildBatchResultFromPayload(payload, marketCapBasis));
+              latestBatchCompleted += 1;
+            } catch (error) {
+              latestBatchResults.push(buildBatchErrorResult(address, error));
+              latestBatchFailed += 1;
+            } finally {
+              activeRequests -= 1;
+              renderBatchResults(latestBatchResults, minMarketCapUsd);
+              const processed = latestBatchCompleted + latestBatchFailed;
+              setStatus(
+                batchStatusBox,
+                `分析中：已處理 ${processed}/${totalAddresses}，成功 ${latestBatchCompleted}、失敗 ${latestBatchFailed}。地址市值口徑：${formatMarketCapBasis(marketCapBasis)}。`
+              );
+              if (nextIndex >= totalAddresses && activeRequests === 0) {
+                resolve();
+                return;
+              }
+              startNext();
+            }
+          })();
+        }
       }
 
-      renderBatchResults(latestBatchResults, minMarketCapUsd);
-      setStatus(
-        batchStatusBox,
-        `分析中：已處理 ${index + 1}/${addresses.length}，成功 ${latestBatchCompleted}、失敗 ${latestBatchFailed}。地址市值口徑：${formatMarketCapBasis(marketCapBasis)}。`
-      );
-    }
+      startNext();
+    });
 
     renderBatchStatusSummary();
     await loadSavedAnalyses();
