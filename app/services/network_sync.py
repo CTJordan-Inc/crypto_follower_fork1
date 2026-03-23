@@ -954,21 +954,25 @@ def _replace_holdings(
         )
     )
 
+    insert_rows: list[dict[str, Any]] = []
     for row_date, balances in snapshots.items():
         for token_key, balance in balances.items():
             if balance <= 0:
                 continue
 
-            db.add(
-                AddressDailyHolding(
-                    address=address,
-                    chain="ethereum",
-                    date=row_date,
-                    token_symbol=token_key,
-                    token_contract=token_contracts.get(token_key),
-                    balance=balance,
-                )
+            insert_rows.append(
+                {
+                    "address": address,
+                    "chain": "ethereum",
+                    "date": row_date,
+                    "token_symbol": token_key,
+                    "token_contract": token_contracts.get(token_key),
+                    "balance": balance,
+                }
             )
+
+    if insert_rows:
+        db.execute(AddressDailyHolding.__table__.insert(), insert_rows)
 
     db.commit()
 
@@ -994,16 +998,20 @@ def _replace_prices(
         )
     )
 
+    insert_rows: list[dict[str, Any]] = []
     for token_key, series in price_map.items():
         for row_date, price_usd in series.items():
-            db.add(
-                TokenDailyPrice(
-                    token_symbol=token_key,
-                    date=row_date,
-                    price_usd=price_usd,
-                    source="coingecko",
-                )
+            insert_rows.append(
+                {
+                    "token_symbol": token_key,
+                    "date": row_date,
+                    "price_usd": price_usd,
+                    "source": "coingecko",
+                }
             )
+
+    if insert_rows:
+        db.execute(TokenDailyPrice.__table__.insert(), insert_rows)
 
     db.commit()
 
