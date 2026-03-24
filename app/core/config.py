@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -28,6 +29,13 @@ class Settings(BaseSettings):
     coingecko_request_interval_seconds: float = 0.3
     coingecko_contract_chunk_size: int = 40
     coingecko_spot_contract_limit: int = 300
+    price_provider: Literal["coingecko", "coincap"] = "coingecko"
+    coincap_base_url: str = "https://api.coincap.io/v2"
+    coincap_api_key: str | None = None
+    coincap_api_key_header: str = "Authorization"
+    coincap_max_retries: int = 3
+    coincap_backoff_seconds: float = 1.0
+    coincap_request_interval_seconds: float = 0.3
     http_timeout_seconds: int = 30
     default_lookback_days: int = 90
     sync_cache_ttl_minutes: int = 720

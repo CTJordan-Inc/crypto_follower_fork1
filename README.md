@@ -66,6 +66,7 @@
    若遇到 Etherscan `Max calls per sec rate limit reached (3/sec)`，可提高 `ETHERSCAN_REQUEST_INTERVAL_SECONDS`（如 `0.6`）。
    若遇到 CoinGecko `429 Too Many Requests`，可設定 `COINGECKO_API_KEY` 並縮短日期區間。
    若遇到 CoinGecko `400`（token_price 批次查詢），系統會自動拆小批次重試並略過無效合約。
+   若想改用 CoinCap 提供的價格資料，可將 `PRICE_PROVIDER=coincap` 並填入 `COINCAP_BASE_URL`/`COINCAP_API_KEY`（預設 header `Authorization`），系統會改用 CoinCap 的 `assets` 和 `history` API 取得 spot+daily 價格。
 
 3. 啟動服務：
 
@@ -146,11 +147,13 @@
 ## 批量分析 API
 
 - `POST /api/v1/performance/batch/network/recompute`
-  - 一次最多 50 個地址
-  - 預設逐個使用快取；只有缺資料或勾選 `refresh=true` 時才會重抓
-  - request body 可指定 `market_cap_basis`，控制批量結果表中的地址市值口徑
-  - 適合先把候選清單跑過一輪，再回到單地址細看
-- Dashboard UI 目前不再一次等待 50 個地址全部完成才顯示結果，而是逐地址呼叫單地址分析 API，逐步把成功/失敗結果寫入表格並更新進度
+  - 一次最多 50 個地址，會排進背景任務後立即回 202
+  - request body 與舊版相同，可指定 `market_cap_basis` 與 `refresh`
+  - 回應範例：`{"batch_id": 123, "status": "pending", "requested": 2}`
+- `GET /api/v1/performance/batch/{batch_id}`
+  - 讀取 job 狀態、完成/失敗數、與已處理地址的摘要（含市值、行為、錯誤訊息）
+  - Dashboard 會定期 poll 這個 endpoint，邊跑邊把結果更新到批量表格，並在 job 完成後自動刷新保存分析列表
+- Dashboard UI 仍支援 `min_market_cap_usd` 過濾，會在結果表中隱藏低於門檻的項目，並顯示隱藏筆數
 - `GET /api/v1/performance/random-addresses`
   - 從近期 Ethereum 區塊隨機抽樣地址
   - query params:
@@ -161,7 +164,7 @@
 範例：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/performance/batch/network/recompute \
+curl -i -X POST http://127.0.0.1:8000/api/v1/performance/batch/network/recompute \
   -H "Content-Type: application/json" \
   -d '{
     "addresses": ["0xabc123", "0xdef456"],
@@ -171,6 +174,12 @@ curl -X POST http://127.0.0.1:8000/api/v1/performance/batch/network/recompute \
     "market_cap_basis": "max_nav",
     "refresh": false
   }'
+```
+
+收到 202 後，可用 job id 反覆 poll：
+
+```bash
+curl http://127.0.0.1:8000/api/v1/performance/batch/123
 ```
 
 ## 保存分析結果

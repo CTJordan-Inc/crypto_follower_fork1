@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, Integer, Numeric, String, UniqueConstraint, func
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.types import JSON
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, UniqueConstraint, func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -128,3 +127,50 @@ class SavedAnalysisSnapshot(Base):
     saved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class BatchJob(Base):
+    __tablename__ = "batch_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    addresses: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    top_n_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    market_cap_basis: Mapped[str] = mapped_column(String(20), nullable=False, default="max_nav")
+    refresh: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    total_addresses: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fault_text: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    results: Mapped[list["BatchJobResult"]] = relationship("BatchJobResult", back_populates="batch_job")
+
+
+class BatchJobResult(Base):
+    __tablename__ = "batch_job_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_job_id: Mapped[int] = mapped_column(ForeignKey("batch_jobs.id"), nullable=False, index=True)
+    address: Mapped[str] = mapped_column(String(100), nullable=False)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    market_cap_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_cap_basis: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    nav_end_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cagr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    behavior_style: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    return_driver: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    explanation: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    used_cache: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    runtime_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    batch_job: Mapped[BatchJob] = relationship("BatchJob", back_populates="results")

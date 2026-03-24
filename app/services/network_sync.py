@@ -34,6 +34,16 @@ ETHERSCAN_RESULT_WINDOW_LIMIT = 10_000
 ETHERSCAN_RATE_LIMIT_STATUS = 429
 COINGECKO_BAD_REQUEST_STATUS = 400
 COINGECKO_RATE_LIMIT_STATUS = 429
+PRICE_RATE_LIMIT_STATUS = 429
+PRICE_BAD_REQUEST_STATUS = 400
+PRICE_PROVIDER_DISPLAY_NAMES = {
+    "coingecko": "CoinGecko",
+    "coincap": "CoinCap",
+}
+PRICE_PROVIDER_API_KEY_ENVS = {
+    "coingecko": "COINGECKO_API_KEY",
+    "coincap": "COINCAP_API_KEY",
+}
 getcontext().prec = 50
 
 
@@ -73,6 +83,20 @@ def _coingecko_headers() -> dict[str, str]:
     return {settings.coingecko_api_key_header: settings.coingecko_api_key}
 
 
+def _price_provider_display_name() -> str:
+    return PRICE_PROVIDER_DISPLAY_NAMES.get(settings.price_provider, settings.price_provider)
+
+
+def _price_provider_api_key_env() -> str:
+    return PRICE_PROVIDER_API_KEY_ENVS.get(
+        settings.price_provider, settings.price_provider.upper() + "_API_KEY"
+    )
+
+
+def _price_source_name() -> str:
+    return settings.price_provider
+
+
 def _get_retry_wait_seconds(response: httpx.Response, attempt: int) -> float:
     retry_after = response.headers.get("Retry-After")
     if retry_after:
@@ -107,6 +131,55 @@ def _coingecko_get_json(
             continue
 
         if response.status_code == 404:
+            return {}
+
+        response.raise_for_status()
+        return response.json()
+
+    return {}
+
+
+def _coincap_headers() -> dict[str, str]:
+    if not settings.coincap_api_key:
+        return {}
+    header_value = settings.coincap_api_key
+    if (
+        settings.coincap_api_key_header.lower() == "authorization"
+        and not header_value.lower().startswith("bearer")
+    ):
+        header_value = f"Bearer {header_value}"
+    return {settings.coincap_api_key_header: header_value}
+
+
+def _coincap_wait_seconds(attempt: int) -> float:
+    return max(0.1, settings.coincap_backoff_seconds * (2**attempt))
+
+
+def _coincap_get_json(
+    client: httpx.Client,
+    url: str,
+    params: dict[str, Any],
+    allow_404: bool = False,
+    max_retries_override: int | None = None,
+) -> dict[str, Any]:
+    headers = _coincap_headers()
+    max_retries = max(0, settings.coincap_max_retries)
+    if max_retries_override is not None:
+        max_retries = max(0, max_retries_override)
+
+    for attempt in range(max_retries + 1):
+        if settings.coincap_request_interval_seconds > 0:
+            time_module.sleep(settings.coincap_request_interval_seconds)
+
+        response = client.get(url, params=params, headers=headers or None)
+
+        if response.status_code == PRICE_RATE_LIMIT_STATUS or response.status_code >= 500:
+            if attempt >= max_retries:
+                response.raise_for_status()
+            time_module.sleep(_coincap_wait_seconds(attempt))
+            continue
+
+        if allow_404 and response.status_code == 404:
             return {}
 
         response.raise_for_status()
@@ -621,10 +694,11 @@ def _estimate_market_cap_from_snapshots(
     return round(max(nav_values), 2)
 
 
-def _load_recent_cached_coingecko_prices(
+def _load_recent_cached_prices(
     db: Session,
     token_keys: list[str],
     as_of_date: date,
+    source: str,
 ) -> dict[str, float]:
     if not token_keys:
         return {}
@@ -635,7 +709,7 @@ def _load_recent_cached_coingecko_prices(
             .where(
                 and_(
                     TokenDailyPrice.token_symbol.in_(token_keys),
-                    TokenDailyPrice.source == "coingecko",
+                    TokenDailyPrice.source == source,
                     TokenDailyPrice.date <= as_of_date,
                 )
             )
@@ -651,11 +725,12 @@ def _load_recent_cached_coingecko_prices(
     return latest_prices
 
 
-def _load_cached_coingecko_price_series(
+def _load_cached_price_series(
     db: Session,
     token_keys: list[str],
     start_date: date,
     end_date: date,
+    source: str,
 ) -> dict[str, dict[date, float]]:
     if not token_keys:
         return {}
@@ -666,7 +741,7 @@ def _load_cached_coingecko_price_series(
             .where(
                 and_(
                     TokenDailyPrice.token_symbol.in_(token_keys),
-                    TokenDailyPrice.source == "coingecko",
+                    TokenDailyPrice.source == source,
                     TokenDailyPrice.date >= start_date,
                     TokenDailyPrice.date <= end_date,
                 )
@@ -699,10 +774,44 @@ def _fetch_spot_prices(
     allow_bad_request_split: bool = True,
     coingecko_max_retries: int | None = None,
 ) -> dict[str, float]:
-    spot_prices = _load_recent_cached_coingecko_prices(
+    if settings.price_provider == "coincap":
+        return _fetch_coincap_spot_prices(
+            db,
+            client,
+            token_contracts,
+            token_reference,
+            as_of_date,
+            contract_limit=contract_limit,
+            allow_bad_request_split=allow_bad_request_split,
+            coingecko_max_retries=coingecko_max_retries,
+        )
+    return _fetch_coingecko_spot_prices(
+        db,
+        client,
+        token_contracts,
+        token_reference,
+        as_of_date,
+        contract_limit=contract_limit,
+        allow_bad_request_split=allow_bad_request_split,
+        coingecko_max_retries=coingecko_max_retries,
+    )
+
+
+def _fetch_coingecko_spot_prices(
+    db: Session,
+    client: httpx.Client,
+    token_contracts: dict[str, str | None],
+    token_reference: dict[str, float],
+    as_of_date: date,
+    contract_limit: int | None = None,
+    allow_bad_request_split: bool = True,
+    coingecko_max_retries: int | None = None,
+) -> dict[str, float]:
+    spot_prices = _load_recent_cached_prices(
         db=db,
         token_keys=sorted(token_reference.keys()),
         as_of_date=as_of_date,
+        source=_price_source_name(),
     )
 
     if "ETH" in token_reference and "ETH" not in spot_prices:
@@ -818,6 +927,107 @@ def _fetch_spot_prices_chunk(
     return chunk_prices
 
 
+def _symbol_from_token_key(token_key: str) -> str | None:
+    if not token_key:
+        return None
+    return token_key.split("_")[0].upper()
+
+
+def _coincap_resolve_asset_entry(client: httpx.Client, symbol: str) -> dict[str, Any] | None:
+    if not symbol:
+        return None
+    symbol_lower = symbol.lower()
+
+    payload = _coincap_get_json(
+        client,
+        f"{settings.coincap_base_url}/assets/{symbol_lower}",
+        {},
+        allow_404=True,
+    )
+    asset = payload.get("data") if payload else None
+    if isinstance(asset, dict) and asset.get("id"):
+        return asset
+
+    payload = _coincap_get_json(
+        client,
+        f"{settings.coincap_base_url}/assets",
+        {"search": symbol_lower, "limit": 5},
+    )
+    candidates = payload.get("data") if payload else []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_symbol = str(candidate.get("symbol", "")).lower()
+        if candidate_symbol == symbol_lower and candidate.get("id"):
+            return candidate
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate.get("id"):
+            return candidate
+    return None
+
+
+def _coincap_price_for_symbol(client: httpx.Client, symbol: str) -> float | None:
+    asset = _coincap_resolve_asset_entry(client, symbol)
+    if not asset:
+        return None
+    price_usd = asset.get("priceUsd")
+    if price_usd is None:
+        return None
+    try:
+        return float(price_usd)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_coincap_spot_prices(
+    db: Session,
+    client: httpx.Client,
+    token_contracts: dict[str, str | None],
+    token_reference: dict[str, float],
+    as_of_date: date,
+    contract_limit: int | None = None,
+    allow_bad_request_split: bool = True,
+    coingecko_max_retries: int | None = None,
+) -> dict[str, float]:
+    spot_prices = _load_recent_cached_prices(
+        db=db,
+        token_keys=sorted(token_reference.keys()),
+        as_of_date=as_of_date,
+        source=_price_source_name(),
+    )
+
+    if "ETH" in token_reference and "ETH" not in spot_prices:
+        eth_price = _coincap_price_for_symbol(client, "ETH")
+        if eth_price is not None:
+            spot_prices["ETH"] = eth_price
+
+    contract_to_tokens: dict[str, list[str]] = defaultdict(list)
+    candidate_tokens = [
+        token_key for token_key in token_reference if token_key != "ETH" and token_key not in spot_prices
+    ]
+    candidate_tokens.sort(key=lambda token_key: token_reference.get(token_key, 0.0), reverse=True)
+    resolved_contract_limit = (
+        max(1, contract_limit) if contract_limit is not None else max(1, settings.coingecko_spot_contract_limit)
+    )
+    candidate_tokens = candidate_tokens[:resolved_contract_limit]
+
+    symbol_to_tokens: dict[str, list[str]] = defaultdict(list)
+    for token_key in candidate_tokens:
+        symbol = _symbol_from_token_key(token_key)
+        if not symbol:
+            continue
+        symbol_to_tokens[symbol].append(token_key)
+
+    for symbol, keys in symbol_to_tokens.items():
+        price = _coincap_price_for_symbol(client, symbol)
+        if price is None:
+            continue
+        for token_key in keys:
+            spot_prices[token_key] = price
+
+    return spot_prices
+
+
 def _select_tokens_for_price_fetch(
     token_reference: dict[str, float],
     spot_prices: dict[str, float],
@@ -895,6 +1105,61 @@ def _extract_daily_prices(
     return filled_daily
 
 
+def _coincap_history_params(start_date: date, end_date: date) -> dict[str, Any]:
+    from_ts = int(datetime.combine(start_date, time.min, tzinfo=timezone.utc).timestamp() * 1000)
+    to_ts = int(datetime.combine(end_date, time.max, tzinfo=timezone.utc).timestamp() * 1000)
+    return {"interval": "d1", "start": from_ts, "end": to_ts}
+
+
+def _coincap_extract_daily_prices(
+    payload: dict[str, Any],
+    start_date: date,
+    end_date: date,
+) -> dict[date, float]:
+    rows = payload.get("data", []) or []
+    raw_daily: dict[date, float] = {}
+
+    for entry in rows:
+        if not isinstance(entry, dict):
+            continue
+        price_usd = entry.get("priceUsd")
+        if price_usd is None:
+            continue
+
+        price_date = None
+        timestamp_ms = entry.get("time")
+        if timestamp_ms is not None:
+            try:
+                price_date = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=timezone.utc).date()
+            except (TypeError, ValueError):
+                price_date = None
+        if price_date is None:
+            date_text = entry.get("date")
+            if date_text:
+                try:
+                    price_date = datetime.fromisoformat(date_text.replace("Z", "+00:00")).date()
+                except ValueError:
+                    continue
+        if price_date is None or not (start_date <= price_date <= end_date):
+            continue
+
+        try:
+            raw_daily[price_date] = float(price_usd)
+        except (TypeError, ValueError):
+            continue
+
+    filled_daily: dict[date, float] = {}
+    last_price: float | None = None
+
+    for current_date in _iter_dates(start_date, end_date):
+        if current_date in raw_daily:
+            last_price = raw_daily[current_date]
+        if last_price is not None:
+            filled_daily[current_date] = last_price
+
+    return filled_daily
+
+
 def _fetch_token_daily_prices(
     client: httpx.Client,
     token_key: str,
@@ -902,6 +1167,9 @@ def _fetch_token_daily_prices(
     start_date: date,
     end_date: date,
 ) -> dict[date, float]:
+    if settings.price_provider == "coincap":
+        return _fetch_coincap_token_daily_prices(client, token_key, contract, start_date, end_date)
+
     if token_key == "ETH":
         url = f"{settings.coingecko_base_url}/coins/ethereum/market_chart/range"
     elif contract:
@@ -916,6 +1184,32 @@ def _fetch_token_daily_prices(
     if not payload:
         return {}
     return _extract_daily_prices(payload, start_date, end_date)
+
+
+def _fetch_coincap_token_daily_prices(
+    client: httpx.Client,
+    token_key: str,
+    contract: str | None,
+    start_date: date,
+    end_date: date,
+) -> dict[date, float]:
+    symbol = _symbol_from_token_key(token_key)
+    if not symbol:
+        return {}
+
+    asset = _coincap_resolve_asset_entry(client, symbol)
+    if not asset or not asset.get("id"):
+        return {}
+
+    asset_id = asset["id"]
+    payload = _coincap_get_json(
+        client,
+        f"{settings.coincap_base_url}/assets/{asset_id}/history",
+        _coincap_history_params(start_date, end_date),
+    )
+    if not payload:
+        return {}
+    return _coincap_extract_daily_prices(payload, start_date, end_date)
 
 
 def _ensure_watchlist_entry(db: Session, address: str) -> None:
@@ -987,11 +1281,12 @@ def _replace_prices(
     if not token_keys:
         return
 
+    price_source = _price_source_name()
     db.execute(
         delete(TokenDailyPrice).where(
             and_(
                 TokenDailyPrice.token_symbol.in_(token_keys),
-                TokenDailyPrice.source == "coingecko",
+                TokenDailyPrice.source == price_source,
                 TokenDailyPrice.date >= start_date,
                 TokenDailyPrice.date <= end_date,
             )
@@ -1006,7 +1301,7 @@ def _replace_prices(
                     "token_symbol": token_key,
                     "date": row_date,
                     "price_usd": price_usd,
-                    "source": "coingecko",
+                    "source": price_source,
                 }
             )
 
@@ -1353,11 +1648,13 @@ def sync_address_from_network_and_recompute(
             )
 
             price_map = _build_stablecoin_price_map(selected_tokens, start_date, effective_end_date)
-            cached_price_map = _load_cached_coingecko_price_series(
+            price_source = _price_source_name()
+            cached_price_map = _load_cached_price_series(
                 db=db,
                 token_keys=[token_key for token_key in selected_tokens if token_key not in price_map],
                 start_date=start_date,
                 end_date=effective_end_date,
+                source=price_source,
             )
             rate_limited_tokens: list[str] = []
 

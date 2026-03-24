@@ -243,6 +243,35 @@ class BatchPerformanceResponse(BaseModel):
     results: list[BatchPerformanceItem]
 
 
+class BatchJobCreateResponse(BaseModel):
+    batch_id: int
+    status: str
+    requested: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BatchJobStatusResponse(BaseModel):
+    id: int
+    status: str
+    requested: int
+    total_addresses: int
+    completed: int
+    failed: int
+    start_date: date
+    end_date: date
+    top_n_tokens: int
+    market_cap_basis: str
+    refresh: bool
+    requested_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    fault_text: str | None
+    results: list[BatchPerformanceItem]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class SavedAnalysisSummary(BaseModel):
     id: int
     address: str

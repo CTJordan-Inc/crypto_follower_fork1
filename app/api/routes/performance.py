@@ -1,11 +1,12 @@
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.schemas import (
-    BatchPerformanceResponse,
+    BatchJobCreateResponse,
+    BatchJobStatusResponse,
     BatchRecomputeRequest,
     NetworkRecomputeRequest,
     PerformanceResponse,
@@ -18,8 +19,12 @@ from app.services.analysis_store import (
     hydrate_saved_performance_payload,
     list_saved_analysis_summaries,
 )
+from app.services.batch_jobs import (
+    create_batch_job,
+    get_batch_job_with_results,
+    process_batch_job,
+)
 from app.services.network_sync import (
-    batch_load_or_sync_address_performance,
     generate_random_recent_addresses,
     load_or_sync_address_performance,
 )
@@ -48,13 +53,18 @@ def recompute_performance(
         raise HTTPException(status_code=status_code, detail=detail) from error
 
 
-@router.post("/batch/network/recompute", response_model=BatchPerformanceResponse)
-def recompute_batch_from_network(
+@router.post(
+    "/batch/network/recompute",
+    response_model=BatchJobCreateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_batch_job(
     payload: BatchRecomputeRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        return batch_load_or_sync_address_performance(
+        job = create_batch_job(
             db,
             addresses=payload.addresses,
             start_date=payload.start_date,
@@ -65,6 +75,43 @@ def recompute_batch_from_network(
         )
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+    background_tasks.add_task(process_batch_job, job.id)
+    return {
+        "batch_id": job.id,
+        "status": job.status,
+        "requested": job.total_addresses,
+    }
+
+
+@router.get("/batch/{batch_id}", response_model=BatchJobStatusResponse)
+def get_batch_job_status(
+    batch_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    job_with_results = get_batch_job_with_results(db, batch_id)
+    if job_with_results is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="batch job not found")
+
+    job, results = job_with_results
+    return {
+        "id": job.id,
+        "status": job.status,
+        "requested": job.total_addresses,
+        "total_addresses": job.total_addresses,
+        "completed": job.completed,
+        "failed": job.failed,
+        "start_date": job.start_date,
+        "end_date": job.end_date,
+        "top_n_tokens": job.top_n_tokens,
+        "market_cap_basis": job.market_cap_basis,
+        "refresh": job.refresh,
+        "requested_at": job.requested_at,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+        "fault_text": job.fault_text,
+        "results": results,
+    }
 
 
 @router.get("/random-addresses", response_model=RandomAddressesResponse)

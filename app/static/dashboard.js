@@ -31,8 +31,11 @@ let latestBatchRequested = 0;
 let latestBatchCompleted = 0;
 let latestBatchFailed = 0;
 let latestBatchFilterBasis = "max_nav";
-const BATCH_ADDRESS_TIMEOUT_MS = 180000;
-const BATCH_CONCURRENCY = 4;
+let latestBatchJobId = null;
+let latestBatchStatus = "pending";
+let latestBatchFault = null;
+let batchPollInProgress = false;
+const BATCH_STATUS_POLL_MS = 2000;
 
 async function extractErrorMessage(response, fallbackMessage) {
   try {
@@ -349,74 +352,77 @@ function renderBatchResults(results, minMarketCapUsd) {
   return display;
 }
 
-function renderBatchStatusSummary() {
+function refreshBatchStatusDisplay() {
   const minMarketCapUsd = Number(batchMinMarketCapInput?.value || 0);
   const display = renderBatchResults(latestBatchResults, minMarketCapUsd);
-  if (!latestBatchResults.length) {
-    return;
-  }
-
   const basisText = formatMarketCapBasis(latestBatchFilterBasis);
+  let message = `批次 ${latestBatchStatus}：已處理 ${latestBatchCompleted}/${latestBatchRequested}，成功 ${latestBatchCompleted}、失敗 ${latestBatchFailed}。地址市值口徑：${basisText}。`;
+
   if (minMarketCapUsd > 0) {
-    setStatus(
-      batchStatusBox,
-      `完成：共 ${latestBatchRequested} 個地址，成功 ${latestBatchCompleted}、失敗 ${latestBatchFailed}。表內顯示 ${display.shownCount} 筆；低於 ${formatUsd(minMarketCapUsd)} 的成功結果已隱藏 ${display.hiddenLowMarketCapCount} 筆。地址市值口徑：${basisText}。`
-    );
-    return;
+    message += ` 低於 ${formatUsd(minMarketCapUsd)} 的成功結果已隱藏 ${display.hiddenLowMarketCapCount} 筆。`;
   }
 
-  setStatus(
-    batchStatusBox,
-    `完成：共 ${latestBatchRequested} 個地址，成功 ${latestBatchCompleted}、失敗 ${latestBatchFailed}。表內顯示全部結果。地址市值口徑：${basisText}。`
-  );
-}
-
-function resolveBatchMarketCap(meta, marketCapBasis) {
-  if (!meta) return null;
-  if (marketCapBasis === "average_nav") {
-    return meta.address_average_nav_usd ?? meta.address_market_cap_usd ?? null;
+  if (latestBatchStatus === "completed") {
+    message = `批量分析完成：成功 ${latestBatchCompleted}、失敗 ${latestBatchFailed}，地址市值口徑：${basisText}。`;
+    if (minMarketCapUsd > 0) {
+      message += ` 低於 ${formatUsd(minMarketCapUsd)} 的成功結果已隱藏 ${display.hiddenLowMarketCapCount} 筆。`;
+    }
   }
-  return meta.address_peak_nav_usd ?? meta.address_market_cap_usd ?? null;
+
+  if (latestBatchStatus === "failed" && latestBatchFault) {
+    message += ` 錯誤：${latestBatchFault}`;
+  }
+
+  setStatus(batchStatusBox, message, latestBatchStatus === "failed");
+  return { display, minMarketCapUsd };
 }
 
-function buildBatchResultFromPayload(payload, marketCapBasis) {
-  const navCurve = payload.nav_curve || [];
-  const navEndUsd = navCurve.length ? navCurve[navCurve.length - 1].nav_usd : null;
-  return {
-    address: payload.address,
-    success: true,
-    market_cap_usd: resolveBatchMarketCap(payload.meta, marketCapBasis),
-    market_cap_basis: marketCapBasis,
-    nav_end_usd: navEndUsd,
-    total_return: payload.metrics?.total_return ?? null,
-    cagr: payload.metrics?.cagr ?? null,
-    sharpe: payload.metrics?.sharpe ?? null,
-    behavior_style: payload.behavior?.style ?? null,
-    return_driver: payload.behavior?.return_driver ?? null,
-    explanation: payload.behavior?.summary ?? null,
-    used_cache: payload.meta?.used_cache ?? null,
-    runtime_seconds: payload.meta?.runtime_seconds ?? null,
-    error: null,
-  };
+function stopBatchPolling() {
+  if (batchPollingTimer) {
+    clearInterval(batchPollingTimer);
+    batchPollingTimer = null;
+  }
+  batchPollInProgress = false;
 }
 
-function buildBatchErrorResult(address, error) {
-  return {
-    address,
-    success: false,
-    market_cap_usd: null,
-    market_cap_basis: null,
-    nav_end_usd: null,
-    total_return: null,
-    cagr: null,
-    sharpe: null,
-    behavior_style: null,
-    return_driver: null,
-    explanation: null,
-    used_cache: null,
-    runtime_seconds: null,
-    error: error.message || String(error),
+async function fetchBatchStatus(batchId) {
+  const payload = await fetchJson(`/api/v1/performance/batch/${batchId}`, { timeoutMs: 15000 });
+  latestBatchResults = payload.results || [];
+  latestBatchRequested = payload.total_addresses;
+  latestBatchCompleted = payload.completed;
+  latestBatchFailed = payload.failed;
+  latestBatchFilterBasis = payload.market_cap_basis || latestBatchFilterBasis;
+  latestBatchStatus = payload.status;
+  latestBatchFault = payload.fault_text || null;
+
+  refreshBatchStatusDisplay();
+
+  if (payload.status === "completed" || payload.status === "failed") {
+    stopBatchPolling();
+    await loadSavedAnalyses();
+  }
+}
+
+function startBatchPolling(batchId) {
+  stopBatchPolling();
+
+  const poll = async () => {
+    if (batchPollInProgress) {
+      return;
+    }
+    batchPollInProgress = true;
+    try {
+      await fetchBatchStatus(batchId);
+    } catch (error) {
+      setStatus(batchStatusBox, `批次狀態更新失敗：${error.message}`, true);
+      stopBatchPolling();
+    } finally {
+      batchPollInProgress = false;
+    }
   };
+
+  poll();
+  batchPollingTimer = window.setInterval(poll, BATCH_STATUS_POLL_MS);
 }
 
 function renderSavedAnalyses(items) {
@@ -542,7 +548,14 @@ async function handleSubmit(event) {
 async function handleBatchSubmit(event) {
   event.preventDefault();
 
-  const { startDate, endDate, topNTokens, minMarketCapUsd, marketCapBasis, refresh } = getBatchQueryParams();
+  const {
+    startDate,
+    endDate,
+    topNTokens,
+    minMarketCapUsd,
+    marketCapBasis,
+    refresh,
+  } = getBatchQueryParams();
   const addresses = String(batchTextarea.value || "")
     .split("\n")
     .map((row) => row.trim())
@@ -553,72 +566,42 @@ async function handleBatchSubmit(event) {
     return;
   }
 
-  setButtonLoading(batchSubmitBtn, true, "分析中...");
-  setStatus(batchStatusBox, refresh ? "批量重抓中，會逐筆顯示結果..." : "批量分析中，會逐筆顯示結果並優先使用快取...");
-
+  stopBatchPolling();
   latestBatchResults = [];
   latestBatchRequested = addresses.length;
   latestBatchCompleted = 0;
   latestBatchFailed = 0;
   latestBatchFilterBasis = marketCapBasis;
-  renderBatchResults(latestBatchResults, minMarketCapUsd);
+  latestBatchStatus = "pending";
+  latestBatchFault = null;
+  latestBatchJobId = null;
+  refreshBatchStatusDisplay();
 
-  const totalAddresses = addresses.length;
+  setButtonLoading(batchSubmitBtn, true, "排入批量分析...");
+  setStatus(batchStatusBox, "已建立批次並排入背景處理，稍後會更新結果...", false);
 
   try {
-    await new Promise((resolve) => {
-      let nextIndex = 0;
-      let activeRequests = 0;
-
-      function startNext() {
-        while (activeRequests < BATCH_CONCURRENCY && nextIndex < totalAddresses) {
-          const address = addresses[nextIndex++];
-          activeRequests += 1;
-
-          (async () => {
-            try {
-              const payload = await fetchJson(
-                `/api/v1/performance/${encodeURIComponent(address)}/network/recompute`,
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    start_date: startDate,
-                    end_date: endDate,
-                    top_n_tokens: topNTokens,
-                    refresh,
-                  }),
-                  timeoutMs: BATCH_ADDRESS_TIMEOUT_MS,
-                }
-              );
-              latestBatchResults.push(buildBatchResultFromPayload(payload, marketCapBasis));
-              latestBatchCompleted += 1;
-            } catch (error) {
-              latestBatchResults.push(buildBatchErrorResult(address, error));
-              latestBatchFailed += 1;
-            } finally {
-              activeRequests -= 1;
-              renderBatchResults(latestBatchResults, minMarketCapUsd);
-              const processed = latestBatchCompleted + latestBatchFailed;
-              setStatus(
-                batchStatusBox,
-                `分析中：已處理 ${processed}/${totalAddresses}，成功 ${latestBatchCompleted}、失敗 ${latestBatchFailed}。地址市值口徑：${formatMarketCapBasis(marketCapBasis)}。`
-              );
-              if (nextIndex >= totalAddresses && activeRequests === 0) {
-                resolve();
-                return;
-              }
-              startNext();
-            }
-          })();
-        }
+    const payload = await fetchJson(
+      "/api/v1/performance/batch/network/recompute",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          addresses,
+          start_date: startDate,
+          end_date: endDate,
+          top_n_tokens: topNTokens,
+          market_cap_basis: marketCapBasis,
+          refresh,
+        }),
       }
+    );
 
-      startNext();
-    });
-
-    renderBatchStatusSummary();
-    await loadSavedAnalyses();
+    latestBatchJobId = payload.batch_id;
+    latestBatchStatus = payload.status;
+    latestBatchRequested = payload.requested;
+    refreshBatchStatusDisplay();
+    startBatchPolling(latestBatchJobId);
   } catch (error) {
     setStatus(batchStatusBox, `失敗：${error.message}`, true);
   } finally {
@@ -639,7 +622,7 @@ savedTableBody.addEventListener("click", async (event) => {
 form.addEventListener("submit", handleSubmit);
 batchForm.addEventListener("submit", handleBatchSubmit);
 randomBatchBtn.addEventListener("click", handleRandomBatchAddresses);
-batchMinMarketCapInput?.addEventListener("change", renderBatchStatusSummary);
+batchMinMarketCapInput?.addEventListener("change", refreshBatchStatusDisplay);
 savedSortByInput?.addEventListener("change", loadSavedAnalyses);
 savedSortOrderInput?.addEventListener("change", loadSavedAnalyses);
 loadSavedAnalyses();
