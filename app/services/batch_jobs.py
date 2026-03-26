@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -72,11 +73,13 @@ def _save_batch_result(
         "success": success,
         "market_cap_basis": job.market_cap_basis,
         "processed_at": datetime.now(timezone.utc),
-        "payload": payload,
     }
 
     if success and payload:
         result_data.update(_summarize_payload(payload, job.market_cap_basis))
+        result_data["payload"] = jsonable_encoder(payload)
+    else:
+        result_data["payload"] = jsonable_encoder(payload) if payload is not None else None
     if not success:
         result_data["error"] = error
 

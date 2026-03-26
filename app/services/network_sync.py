@@ -151,41 +151,136 @@ def _coincap_headers() -> dict[str, str]:
     return {settings.coincap_api_key_header: header_value}
 
 
-def _coincap_wait_seconds(attempt: int) -> float:
-    return max(0.1, settings.coincap_backoff_seconds * (2**attempt))
-
-
-def _coincap_get_json(
+def _coincap_graphql_query(
     client: httpx.Client,
-    url: str,
-    params: dict[str, Any],
-    allow_404: bool = False,
-    max_retries_override: int | None = None,
+    query: str,
+    variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    headers = _coincap_headers()
-    max_retries = max(0, settings.coincap_max_retries)
-    if max_retries_override is not None:
-        max_retries = max(0, max_retries_override)
+    response = client.post(
+        settings.coincap_graphql_url,
+        json={"query": query, "variables": variables or {}},
+        headers={"Accept": "application/json"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    errors = payload.get("errors") or []
+    if errors:
+        raise ValueError(f"coincap graphql error: {errors}")
+    return payload.get("data") or {}
 
-    for attempt in range(max_retries + 1):
-        if settings.coincap_request_interval_seconds > 0:
-            time_module.sleep(settings.coincap_request_interval_seconds)
 
-        response = client.get(url, params=params, headers=headers or None)
+_coincap_asset_id_cache: dict[str, str] = {}
 
-        if response.status_code == PRICE_RATE_LIMIT_STATUS or response.status_code >= 500:
-            if attempt >= max_retries:
-                response.raise_for_status()
-            time_module.sleep(_coincap_wait_seconds(attempt))
+
+def _resolve_coincap_asset_id(
+    client: httpx.Client,
+    symbol: str,
+) -> str | None:
+    normalized_symbol = symbol.upper()
+    if not normalized_symbol:
+        return None
+    cached = _coincap_asset_id_cache.get(normalized_symbol)
+    if cached:
+        return cached
+
+    query = """
+    query AssetsBySymbol($symbol: String!, $first: Int!) {
+        assets(first: $first, where: { symbol_starts_with: $symbol }) {
+            edges {
+                node {
+                    id
+                    symbol
+                }
+            }
+        }
+    }
+    """
+
+    data = _coincap_graphql_query(
+        client,
+        query,
+        {"symbol": normalized_symbol, "first": 12},
+    )
+    edges = data.get("assets", {}).get("edges", [])
+    nodes = [edge.get("node") for edge in edges if edge.get("node")]
+    if not nodes:
+        return None
+
+    match = next(
+        (node for node in nodes if node.get("symbol", "").upper() == normalized_symbol),
+        nodes[0],
+    )
+    asset_id = match.get("id") if match else None
+    if asset_id:
+        _coincap_asset_id_cache[normalized_symbol] = asset_id
+        return asset_id
+    return None
+
+
+def _fetch_coincap_asset_price(client: httpx.Client, asset_id: str) -> float | None:
+    query = """
+    query AssetPrice($id: ID!) {
+        asset(id: $id) {
+            priceUsd
+        }
+    }
+    """
+
+    data = _coincap_graphql_query(client, query, {"id": asset_id})
+    asset = data.get("asset")
+    if not asset:
+        return None
+    price = asset.get("priceUsd")
+    if price is None:
+        return None
+    try:
+        return float(price)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_coincap_asset_history(
+    client: httpx.Client,
+    asset_id: str,
+    start_date: date,
+    end_date: date,
+) -> dict[date, float]:
+    query = """
+    query AssetHistories($assetId: ID!, $start: Date!, $end: Date!, $interval: Interval!) {
+        assetHistories(assetId: $assetId, start: $start, end: $end, interval: $interval) {
+            priceUsd
+            date
+        }
+    }
+    """
+
+    data = _coincap_graphql_query(
+        client,
+        query,
+        {
+            "assetId": asset_id,
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
+            "interval": "d1",
+        },
+    )
+    rows = data.get("assetHistories") or []
+    series: dict[date, float] = {}
+    for entry in rows:
+        price = entry.get("priceUsd")
+        date_text = entry.get("date")
+        if price is None or not date_text:
             continue
-
-        if allow_404 and response.status_code == 404:
-            return {}
-
-        response.raise_for_status()
-        return response.json()
-
-    return {}
+        try:
+            parsed_date = datetime.fromisoformat(date_text).date()
+        except ValueError:
+            continue
+        try:
+            price_value = float(price)
+        except (TypeError, ValueError):
+            continue
+        series[parsed_date] = price_value
+    return series
 
 
 def _build_token_key(
@@ -933,51 +1028,6 @@ def _symbol_from_token_key(token_key: str) -> str | None:
     return token_key.split("_")[0].upper()
 
 
-def _coincap_resolve_asset_entry(client: httpx.Client, symbol: str) -> dict[str, Any] | None:
-    if not symbol:
-        return None
-    symbol_lower = symbol.lower()
-
-    payload = _coincap_get_json(
-        client,
-        f"{settings.coincap_base_url}/assets/{symbol_lower}",
-        {},
-        allow_404=True,
-    )
-    asset = payload.get("data") if payload else None
-    if isinstance(asset, dict) and asset.get("id"):
-        return asset
-
-    payload = _coincap_get_json(
-        client,
-        f"{settings.coincap_base_url}/assets",
-        {"search": symbol_lower, "limit": 5},
-    )
-    candidates = payload.get("data") if payload else []
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        candidate_symbol = str(candidate.get("symbol", "")).lower()
-        if candidate_symbol == symbol_lower and candidate.get("id"):
-            return candidate
-    for candidate in candidates:
-        if isinstance(candidate, dict) and candidate.get("id"):
-            return candidate
-    return None
-
-
-def _coincap_price_for_symbol(client: httpx.Client, symbol: str) -> float | None:
-    asset = _coincap_resolve_asset_entry(client, symbol)
-    if not asset:
-        return None
-    price_usd = asset.get("priceUsd")
-    if price_usd is None:
-        return None
-    try:
-        return float(price_usd)
-    except (TypeError, ValueError):
-        return None
-
 
 def _fetch_coincap_spot_prices(
     db: Session,
@@ -996,12 +1046,7 @@ def _fetch_coincap_spot_prices(
         source=_price_source_name(),
     )
 
-    if "ETH" in token_reference and "ETH" not in spot_prices:
-        eth_price = _coincap_price_for_symbol(client, "ETH")
-        if eth_price is not None:
-            spot_prices["ETH"] = eth_price
-
-    contract_to_tokens: dict[str, list[str]] = defaultdict(list)
+    stable_set = {symbol.upper() for symbol in settings.stablecoins}
     candidate_tokens = [
         token_key for token_key in token_reference if token_key != "ETH" and token_key not in spot_prices
     ]
@@ -1011,19 +1056,28 @@ def _fetch_coincap_spot_prices(
     )
     candidate_tokens = candidate_tokens[:resolved_contract_limit]
 
-    symbol_to_tokens: dict[str, list[str]] = defaultdict(list)
     for token_key in candidate_tokens:
         symbol = _symbol_from_token_key(token_key)
         if not symbol:
             continue
-        symbol_to_tokens[symbol].append(token_key)
+        if symbol.upper() in stable_set:
+            spot_prices[token_key] = 1.0
+            continue
 
-    for symbol, keys in symbol_to_tokens.items():
-        price = _coincap_price_for_symbol(client, symbol)
+        asset_id = _resolve_coincap_asset_id(client, symbol)
+        if not asset_id:
+            continue
+        price = _fetch_coincap_asset_price(client, asset_id)
         if price is None:
             continue
-        for token_key in keys:
-            spot_prices[token_key] = price
+        spot_prices[token_key] = price
+
+    if "ETH" in token_reference and "ETH" not in spot_prices:
+        asset_id = _resolve_coincap_asset_id(client, "ETH")
+        if asset_id:
+            price = _fetch_coincap_asset_price(client, asset_id)
+            if price is not None:
+                spot_prices["ETH"] = price
 
     return spot_prices
 
@@ -1105,61 +1159,6 @@ def _extract_daily_prices(
     return filled_daily
 
 
-def _coincap_history_params(start_date: date, end_date: date) -> dict[str, Any]:
-    from_ts = int(datetime.combine(start_date, time.min, tzinfo=timezone.utc).timestamp() * 1000)
-    to_ts = int(datetime.combine(end_date, time.max, tzinfo=timezone.utc).timestamp() * 1000)
-    return {"interval": "d1", "start": from_ts, "end": to_ts}
-
-
-def _coincap_extract_daily_prices(
-    payload: dict[str, Any],
-    start_date: date,
-    end_date: date,
-) -> dict[date, float]:
-    rows = payload.get("data", []) or []
-    raw_daily: dict[date, float] = {}
-
-    for entry in rows:
-        if not isinstance(entry, dict):
-            continue
-        price_usd = entry.get("priceUsd")
-        if price_usd is None:
-            continue
-
-        price_date = None
-        timestamp_ms = entry.get("time")
-        if timestamp_ms is not None:
-            try:
-                price_date = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=timezone.utc).date()
-            except (TypeError, ValueError):
-                price_date = None
-        if price_date is None:
-            date_text = entry.get("date")
-            if date_text:
-                try:
-                    price_date = datetime.fromisoformat(date_text.replace("Z", "+00:00")).date()
-                except ValueError:
-                    continue
-        if price_date is None or not (start_date <= price_date <= end_date):
-            continue
-
-        try:
-            raw_daily[price_date] = float(price_usd)
-        except (TypeError, ValueError):
-            continue
-
-    filled_daily: dict[date, float] = {}
-    last_price: float | None = None
-
-    for current_date in _iter_dates(start_date, end_date):
-        if current_date in raw_daily:
-            last_price = raw_daily[current_date]
-        if last_price is not None:
-            filled_daily[current_date] = last_price
-
-    return filled_daily
-
-
 def _fetch_token_daily_prices(
     client: httpx.Client,
     token_key: str,
@@ -1168,7 +1167,13 @@ def _fetch_token_daily_prices(
     end_date: date,
 ) -> dict[date, float]:
     if settings.price_provider == "coincap":
-        return _fetch_coincap_token_daily_prices(client, token_key, contract, start_date, end_date)
+        symbol = _symbol_from_token_key(token_key)
+        if not symbol:
+            return {}
+        asset_id = _resolve_coincap_asset_id(client, symbol)
+        if not asset_id:
+            return {}
+        return _fetch_coincap_asset_history(client, asset_id, start_date, end_date)
 
     if token_key == "ETH":
         url = f"{settings.coingecko_base_url}/coins/ethereum/market_chart/range"
@@ -1184,32 +1189,6 @@ def _fetch_token_daily_prices(
     if not payload:
         return {}
     return _extract_daily_prices(payload, start_date, end_date)
-
-
-def _fetch_coincap_token_daily_prices(
-    client: httpx.Client,
-    token_key: str,
-    contract: str | None,
-    start_date: date,
-    end_date: date,
-) -> dict[date, float]:
-    symbol = _symbol_from_token_key(token_key)
-    if not symbol:
-        return {}
-
-    asset = _coincap_resolve_asset_entry(client, symbol)
-    if not asset or not asset.get("id"):
-        return {}
-
-    asset_id = asset["id"]
-    payload = _coincap_get_json(
-        client,
-        f"{settings.coincap_base_url}/assets/{asset_id}/history",
-        _coincap_history_params(start_date, end_date),
-    )
-    if not payload:
-        return {}
-    return _coincap_extract_daily_prices(payload, start_date, end_date)
 
 
 def _ensure_watchlist_entry(db: Session, address: str) -> None:

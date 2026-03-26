@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     coincap_max_retries: int = 3
     coincap_backoff_seconds: float = 1.0
     coincap_request_interval_seconds: float = 0.3
+    coincap_graphql_url: str = "https://graphql.coincap.io/"
     http_timeout_seconds: int = 30
     default_lookback_days: int = 90
     sync_cache_ttl_minutes: int = 720
@@ -53,6 +54,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
 

@@ -148,7 +148,7 @@
 
 - `POST /api/v1/performance/batch/network/recompute`
   - 一次最多 50 個地址，會排進背景任務後立即回 202
-  - request body 與舊版相同，可指定 `market_cap_basis` 與 `refresh`
+  - request body 與舊版相同，可指定 `market_cap_basis` 與 `refresh`；新增 `filter_empty_holdings` 參數，可先剔除在該日期範圍沒有持倉紀錄的地址（預設 false）
   - 回應範例：`{"batch_id": 123, "status": "pending", "requested": 2}`
 - `GET /api/v1/performance/batch/{batch_id}`
   - 讀取 job 狀態、完成/失敗數、與已處理地址的摘要（含市值、行為、錯誤訊息）
@@ -172,7 +172,8 @@ curl -i -X POST http://127.0.0.1:8000/api/v1/performance/batch/network/recompute
     "end_date": "2025-03-31",
     "top_n_tokens": 10,
     "market_cap_basis": "max_nav",
-    "refresh": false
+    "refresh": false,
+    "filter_empty_holdings": true
   }'
 ```
 

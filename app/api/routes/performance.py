@@ -1,13 +1,16 @@
 from datetime import date, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.models import AddressDailyHolding
 from app.schemas import (
     BatchJobCreateResponse,
     BatchJobStatusResponse,
     BatchRecomputeRequest,
+    HoldingsExistResponse,
     NetworkRecomputeRequest,
     PerformanceResponse,
     RandomAddressesResponse,
@@ -19,6 +22,7 @@ from app.services.analysis_store import (
     hydrate_saved_performance_payload,
     list_saved_analysis_summaries,
 )
+from app.utils.normalizers import normalize_address
 from app.services.batch_jobs import (
     create_batch_job,
     get_batch_job_with_results,
@@ -53,6 +57,38 @@ def recompute_performance(
         raise HTTPException(status_code=status_code, detail=detail) from error
 
 
+def _build_holdings_query(address: str, start_date: date, end_date: date):
+    return (
+        select(AddressDailyHolding.id)
+        .where(
+            and_(
+                AddressDailyHolding.address == address,
+                AddressDailyHolding.date >= start_date,
+                AddressDailyHolding.date <= end_date,
+            )
+        )
+        .limit(1)
+    )
+
+
+def _filter_addresses_with_holdings(db: Session, addresses: list[str], start_date: date, end_date: date) -> tuple[list[str], list[str]]:
+    kept: list[str] = []
+    filtered: list[str] = []
+    seen_addresses: set[str] = set()
+
+    for address in addresses:
+        normalized = normalize_address(address)
+        if not normalized or normalized in seen_addresses:
+            continue
+        seen_addresses.add(normalized)
+        has_holdings = db.scalar(_build_holdings_query(normalized, start_date, end_date)) is not None
+        if has_holdings:
+            kept.append(normalized)
+        else:
+            filtered.append(normalized)
+
+    return kept, filtered
+
 @router.post(
     "/batch/network/recompute",
     response_model=BatchJobCreateResponse,
@@ -63,10 +99,26 @@ def enqueue_batch_job(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> dict:
+    candidate_addresses = payload.addresses
+    filtered_addresses: list[str] | None = None
+
+    if payload.filter_empty_holdings:
+        candidate_addresses, filtered_addresses = _filter_addresses_with_holdings(
+            db,
+            payload.addresses,
+            payload.start_date,
+            payload.end_date,
+        )
+        if not candidate_addresses:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"no addresses with holdings found between {payload.start_date} and {payload.end_date}",
+            )
+
     try:
         job = create_batch_job(
             db,
-            addresses=payload.addresses,
+            addresses=candidate_addresses,
             start_date=payload.start_date,
             end_date=payload.end_date,
             top_n_tokens=payload.top_n_tokens,
@@ -77,13 +129,38 @@ def enqueue_batch_job(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
     background_tasks.add_task(process_batch_job, job.id)
-    return {
+    response = {
         "batch_id": job.id,
         "status": job.status,
         "requested": job.total_addresses,
     }
 
+    if filtered_addresses:
+        response["filtered_addresses"] = filtered_addresses
 
+    return response
+
+
+@router.get("/{address}/holdings-exists", response_model=HoldingsExistResponse)
+def check_holdings_exists(
+    address: str,
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    db: Session = Depends(get_db),
+) -> dict:
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="end_date must be greater than or equal to start_date",
+        )
+    normalized = normalize_address(address)
+    exists = db.scalar(_build_holdings_query(normalized, start_date, end_date)) is not None
+    return {
+        "address": normalized,
+        "start_date": start_date,
+        "end_date": end_date,
+        "exists": exists,
+    }
 @router.get("/batch/{batch_id}", response_model=BatchJobStatusResponse)
 def get_batch_job_status(
     batch_id: int,

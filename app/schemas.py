@@ -153,6 +153,10 @@ class BatchRecomputeRequest(BaseModel):
     top_n_tokens: int = Field(default=10, ge=1, le=100)
     market_cap_basis: str = "max_nav"
     refresh: bool = False
+    filter_empty_holdings: bool = Field(
+        default=False,
+        description="Drop addresses that have no holdings rows in the requested date range before enqueuing the job.",
+    )
 
     @field_validator("addresses")
     @classmethod
@@ -247,6 +251,7 @@ class BatchJobCreateResponse(BaseModel):
     batch_id: int
     status: str
     requested: int
+    filtered_addresses: list[str] | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -303,3 +308,10 @@ class RandomAddressesResponse(BaseModel):
     min_market_cap_usd: float
     market_cap_basis: str
     filter_stage: str
+
+
+class HoldingsExistResponse(BaseModel):
+    address: str
+    start_date: date
+    end_date: date
+    exists: bool
